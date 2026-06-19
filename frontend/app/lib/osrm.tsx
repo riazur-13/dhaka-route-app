@@ -23,7 +23,7 @@ export async function submitFare(
   fareAmount: number,
   routeType: 'walking' | 'rickshaw'
 ) {
-  const res = await fetch(API_BASE, {
+  const res = await fetch(`${API_BASE}/fares`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -35,19 +35,12 @@ export async function submitFare(
   return res.json();
 }
 
+
 export async function getAverageFare(
   distanceKm: number,
-  fareAmount: number,
   routeType: 'walking' | 'rickshaw'
 ) {
-  const res = await fetch(`${API_BASE}/fares`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      distance_km: distanceKm,
-      fare_amount: fareAmount,
-      route_type: routeType,
-    }),
-  });
-  return res.json();
+  const url = ` https://dhaka-route-app-4.onrender.com/fares/average?distance_km=${distanceKm}&route_type=${routeType}`;
+  const res = await fetch(url);
+  return res.json(); // { average_fare, submission_count }
 }
