@@ -1,4 +1,5 @@
-const API_BASE = ' https://dhaka-route-app-4.onrender.com'
+const API_BASE = 'https://dhaka-route-app-4.onrender.com'; // ✅ no space
+
 export async function fetchRoute(
   start: [number, number],
   end: [number, number]
@@ -14,10 +15,11 @@ export async function fetchRoute(
 
   return {
     coordinates,
-    distance: data.distance, // metres
-    duration: data.duration, // seconds
+    distance: data.distance,
+    duration: data.duration,
   };
 }
+
 export async function submitFare(
   distanceKm: number,
   fareAmount: number,
@@ -35,12 +37,11 @@ export async function submitFare(
   return res.json();
 }
 
-
 export async function getAverageFare(
   distanceKm: number,
   routeType: 'walking' | 'rickshaw'
 ) {
-  const url = ` https://dhaka-route-app-4.onrender.com/fares/average?distance_km=${distanceKm}&route_type=${routeType}`;
+  const url = `${API_BASE}/fares/average?distance_km=${distanceKm}&route_type=${routeType}`; // ✅ uses API_BASE
   const res = await fetch(url);
-  return res.json(); // { average_fare, submission_count }
+  return res.json();
 }
