@@ -23,7 +23,7 @@ export async function submitFare(
   fareAmount: number,
   routeType: 'walking' | 'rickshaw'
 ) {
-  const res = await fetch('http://localhost:8000/fares', {
+  const res = await fetch('https://dhaka-route-app-4.onrender.com', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
