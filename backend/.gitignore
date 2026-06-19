@@ -1,0 +1,13 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Local databases
+*.db
+*.sqlite3
+
+# Virtual environment
+venv/
+
+# Next.js build artifacts
+frontend/.next/
