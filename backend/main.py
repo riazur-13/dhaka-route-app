@@ -92,3 +92,40 @@ def get_average_fare(distance_km: float, route_type: str):
         "average_fare": round(avg_fare, 2) if avg_fare else None,
         "submission_count": count,
     }
+@app.get("/search")
+async def search_place(query: str):
+    full_query = f"{query}, Dhaka, Bangladesh"
+    
+    url = "https://nominatim.openstreetmap.org/search"
+    
+    params = {
+        "q": full_query,
+        "format": "json",
+        "limit": 5,
+        "countrycodes": "bd",
+        "accept-language": "en",
+        "dedupe": 1,          # remove duplicate results
+    }
+    
+    headers = {
+        "User-Agent": "DhakaRouteApp/1.0"
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, params=params, headers=headers)
+        data = response.json()
+
+    # Clean up the display name — Nominatim returns very long names
+    # e.g. "Dhanmondi, Dhaka, Dhaka District, Dhaka Division, Bangladesh"
+    # We just want "Dhanmondi, Dhaka"
+    results = [
+        {
+            "name": ", ".join(place["display_name"].split(", ")[:3]),
+            "full_name": place["display_name"],
+            "lat": float(place["lat"]),
+            "lng": float(place["lon"]),
+        }
+        for place in data
+    ]
+
+    return {"results": results}
