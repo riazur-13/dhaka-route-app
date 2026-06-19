@@ -39,7 +39,7 @@ export async function getAverageFare(
   distanceKm: number,
   routeType: 'walking' | 'rickshaw'
 ) {
-  const url = `http://localhost:8000/fares/average?distance_km=${distanceKm}&route_type=${routeType}`;
+  const url = ` https://dhaka-route-app-4.onrender.com/fares/average?distance_km=${distanceKm}&route_type=${routeType}`;
   const res = await fetch(url);
   return res.json(); // { average_fare, submission_count }
 }
