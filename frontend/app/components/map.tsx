@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { MapContainer, TileLayer, Marker, Polyline, useMapEvents } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
-import { fetchRoute } from '../lib/osrm';
+import { fetchRoute, submitFare, getAverageFare } from '../lib/osrm';
 
 const startIcon = L.divIcon({
   className: '',
@@ -29,9 +29,8 @@ function ClickHandler({ onMapClick }: { onMapClick: (lat: number, lng: number) =
   return null;
 }
 
-// Helper functions
 function toKm(metres: number) {
-  return (metres / 1000).toFixed(1);
+  return parseFloat((metres / 1000).toFixed(1));
 }
 
 function toMinutes(seconds: number) {
@@ -50,6 +49,12 @@ export default function Map() {
   const [routeData, setRouteData] = useState<RouteData | null>(null);
   const [loading, setLoading] = useState(false);
 
+  // Fare submission state
+  const [fareInput, setFareInput] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [avgFare, setAvgFare] = useState<number | null>(null);
+  const [submissionCount, setSubmissionCount] = useState(0);
+
   async function handleMapClick(lat: number, lng: number) {
     if (!start) {
       setStart([lat, lng]);
@@ -58,20 +63,44 @@ export default function Map() {
       setLoading(true);
 
       const data = await fetchRoute(start, [lat, lng]);
-      if (data) setRouteData(data);
+      if (data) {
+        setRouteData(data);
+        // Fetch existing average fare for this distance
+        const avg = await getAverageFare(toKm(data.distance), 'rickshaw');
+        setAvgFare(avg.average_fare);
+        setSubmissionCount(avg.submission_count);
+      }
 
       setLoading(false);
     } else {
       setStart([lat, lng]);
       setEnd(null);
       setRouteData(null);
+      setAvgFare(null);
+      setFareInput('');
     }
+  }
+
+  async function handleFareSubmit() {
+    if (!routeData || !fareInput) return;
+
+    setSubmitting(true);
+
+    await submitFare(toKm(routeData.distance), parseFloat(fareInput), 'rickshaw');
+
+    // Refresh the average after submitting
+    const avg = await getAverageFare(toKm(routeData.distance), 'rickshaw');
+    setAvgFare(avg.average_fare);
+    setSubmissionCount(avg.submission_count);
+
+    setFareInput('');
+    setSubmitting(false);
   }
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100vh' }}>
 
-      {/* Info panel — top right */}
+      {/* Info + fare panel — top right */}
       {routeData && (
         <div style={{
           position: 'absolute',
@@ -85,7 +114,7 @@ export default function Map() {
           display: 'flex',
           flexDirection: 'column',
           gap: '12px',
-          minWidth: '180px',
+          minWidth: '220px',
           border: '1px solid #334155',
         }}>
           {/* Walking */}
@@ -94,10 +123,7 @@ export default function Map() {
               🚶 Walking
             </p>
             <p style={{ color: 'white', fontSize: '15px', fontWeight: 600 }}>
-              {toKm(routeData.distance)} km
-            </p>
-            <p style={{ color: '#94a3b8', fontSize: '12px' }}>
-              {toMinutes(routeData.duration)} min
+              {toKm(routeData.distance)} km · {toMinutes(routeData.duration)} min
             </p>
           </div>
 
@@ -111,12 +137,55 @@ export default function Map() {
             <p style={{ color: 'white', fontSize: '15px', fontWeight: 600 }}>
               {toKm(routeData.distance)} km
             </p>
-            <p style={{ color: '#94a3b8', fontSize: '12px' }}>
-              {toMinutes(routeData.duration * 1.3)} min
-            </p>
-            <p style={{ color: '#f59e0b', fontSize: '12px', marginTop: '4px' }}>
-              ৳{Math.round(30 + (routeData.distance / 1000) * 25)} est. fare
-            </p>
+
+            {/* Crowdsourced average fare */}
+            {avgFare ? (
+              <p style={{ color: '#f59e0b', fontSize: '14px', marginTop: '6px', fontWeight: 600 }}>
+                ৳{avgFare} avg <span style={{ color: '#94a3b8', fontWeight: 400, fontSize: '12px' }}>
+                  ({submissionCount} trip{submissionCount !== 1 ? 's' : ''})
+                </span>
+              </p>
+            ) : (
+              <p style={{ color: '#94a3b8', fontSize: '12px', marginTop: '6px' }}>
+                No fare data yet for this distance
+              </p>
+            )}
+
+            {/* Fare submission input */}
+            <div style={{ display: 'flex', gap: '6px', marginTop: '10px' }}>
+              <input
+                type="number"
+                placeholder="Your fare (৳)"
+                value={fareInput}
+                onChange={(e) => setFareInput(e.target.value)}
+                style={{
+                  flex: 1,
+                  padding: '6px 8px',
+                  borderRadius: '6px',
+                  border: '1px solid #334155',
+                  background: '#0f172a',
+                  color: 'white',
+                  fontSize: '13px',
+                  width: '100px',
+                }}
+              />
+              <button
+                onClick={handleFareSubmit}
+                disabled={submitting || !fareInput}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  border: 'none',
+                  background: submitting ? '#475569' : '#f59e0b',
+                  color: 'white',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  cursor: submitting ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {submitting ? '...' : 'Submit'}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -139,7 +208,7 @@ export default function Map() {
         </div>
       )}
 
-      {/* Legend — bottom left */}
+      {/* Legend */}
       <div style={{
         position: 'absolute',
         bottom: '32px',
@@ -163,20 +232,12 @@ export default function Map() {
         </div>
       </div>
 
-      {/* Hint */}
+      {/* Click hints */}
       {!start && (
         <div style={{
-          position: 'absolute',
-          top: '16px',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          zIndex: 1000,
-          background: 'rgba(15,23,42,0.9)',
-          color: 'white',
-          padding: '8px 16px',
-          borderRadius: '8px',
-          fontSize: '13px',
-          whiteSpace: 'nowrap',
+          position: 'absolute', top: '16px', left: '50%', transform: 'translateX(-50%)',
+          zIndex: 1000, background: 'rgba(15,23,42,0.9)', color: 'white',
+          padding: '8px 16px', borderRadius: '8px', fontSize: '13px', whiteSpace: 'nowrap',
         }}>
           📍 Click to set start point
         </div>
@@ -184,17 +245,9 @@ export default function Map() {
 
       {start && !end && (
         <div style={{
-          position: 'absolute',
-          top: '16px',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          zIndex: 1000,
-          background: 'rgba(15,23,42,0.9)',
-          color: 'white',
-          padding: '8px 16px',
-          borderRadius: '8px',
-          fontSize: '13px',
-          whiteSpace: 'nowrap',
+          position: 'absolute', top: '16px', left: '50%', transform: 'translateX(-50%)',
+          zIndex: 1000, background: 'rgba(15,23,42,0.9)', color: 'white',
+          padding: '8px 16px', borderRadius: '8px', fontSize: '13px', whiteSpace: 'nowrap',
         }}>
           🏁 Click to set destination
         </div>
@@ -218,11 +271,9 @@ export default function Map() {
         {routeData && (
           <Polyline positions={routeData.coordinates} color="#22c55e" weight={6} />
         )}
-
         {routeData && (
           <Polyline positions={routeData.coordinates} color="#f59e0b" weight={3} dashArray="10, 10" />
         )}
-
       </MapContainer>
     </div>
   );

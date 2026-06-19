@@ -18,3 +18,28 @@ export async function fetchRoute(
     duration: data.duration, // seconds
   };
 }
+export async function submitFare(
+  distanceKm: number,
+  fareAmount: number,
+  routeType: 'walking' | 'rickshaw'
+) {
+  const res = await fetch('http://localhost:8000/fares', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      distance_km: distanceKm,
+      fare_amount: fareAmount,
+      route_type: routeType,
+    }),
+  });
+  return res.json();
+}
+
+export async function getAverageFare(
+  distanceKm: number,
+  routeType: 'walking' | 'rickshaw'
+) {
+  const url = `http://localhost:8000/fares/average?distance_km=${distanceKm}&route_type=${routeType}`;
+  const res = await fetch(url);
+  return res.json(); // { average_fare, submission_count }
+}
