@@ -104,7 +104,7 @@ async def search_place(query: str):
         "limit": 5,
         "countrycodes": "bd",
         "accept-language": "en",
-        "dedupe": 1,          # remove duplicate results
+        "dedupe": 1,
     }
     
     headers = {
@@ -115,9 +115,6 @@ async def search_place(query: str):
         response = await client.get(url, params=params, headers=headers)
         data = response.json()
 
-    # Clean up the display name — Nominatim returns very long names
-    # e.g. "Dhanmondi, Dhaka, Dhaka District, Dhaka Division, Bangladesh"
-    # We just want "Dhanmondi, Dhaka"
     results = [
         {
             "name": ", ".join(place["display_name"].split(", ")[:3]),
@@ -129,3 +126,37 @@ async def search_place(query: str):
     ]
 
     return {"results": results}
+
+
+@app.get("/reverse-geocode")
+async def reverse_geocode(lat: float, lng: float):
+    url = "https://nominatim.openstreetmap.org/reverse"
+    
+    params = {
+        "lat": lat,
+        "lon": lng,
+        "format": "json",
+    }
+    
+    headers = {
+        "User-Agent": "DhakaRouteApp/1.0"
+    }
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, params=params, headers=headers)
+        data = response.json()
+    
+    if "error" in data:
+        return {"name": f"{lat:.4f}, {lng:.4f}"}
+    
+    address = data.get("address", {})
+    name = (
+        address.get("road") or
+        address.get("neighbourhood") or
+        address.get("suburb") or
+        address.get("town") or
+        address.get("city") or
+        data.get("display_name", f"{lat:.4f}, {lng:.4f}")
+    )
+    
+    return {"name": name}
