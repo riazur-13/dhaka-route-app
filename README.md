@@ -24,24 +24,7 @@ A map app for Dhaka, Bangladesh showing walking and rickshaw routes with crowdso
 
 **APIs:** OSRM (routing), Nominatim (place search + reverse geocoding)
 
----
 
-## Run Locally
-
-**Frontend**
-```bash
-cd frontend
-npm install && npm run dev
-```
-
-**Backend**
-```bash
-cd backend
-pip install -r requirements.txt
-uvicorn main:app --reload
-```
-
----
 
 ## Known Limitations
 
