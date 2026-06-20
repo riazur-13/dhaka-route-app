@@ -60,6 +60,36 @@ export default function Map() {
   const [avgFare, setAvgFare] = useState<number | null>(null);
   const [submissionCount, setSubmissionCount] = useState(0);
 
+  // Add this function inside your Map component
+function handleCurrentLocation() {
+  if (!navigator.geolocation) {
+    alert('Geolocation is not supported by your browser');
+    return;
+  }
+
+  navigator.geolocation.getCurrentPosition(
+    async (position) => {
+      const lat = position.coords.latitude;
+      const lng = position.coords.longitude;
+
+      // Get place name for current location
+      const name = await reverseGeocode(lat, lng);
+
+      setStart([lat, lng]);
+      setStartName(name);
+      setRouteData(null);
+      setAvgFare(null);
+
+      // If end already set, fetch route immediately
+      if (end) await getRoute([lat, lng], end);
+    },
+    (error) => {
+      alert('Could not get your location. Please allow location access.');
+      console.error(error);
+    }
+  );
+}
+
   async function getRoute(
     startPoint: [number, number],
     endPoint: [number, number]
@@ -134,6 +164,7 @@ export default function Map() {
     setFareInput('');
     setSubmitting(false);
   }
+  
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100vh' }}>
@@ -168,6 +199,35 @@ export default function Map() {
           value={endName}
           onSelect={(lat, lng, name) => handleSearchSelect('end', lat, lng, name)}
         />
+        {/* Current location button */}
+<button
+  onClick={handleCurrentLocation}
+  style={{
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '6px',
+    width: '100%',
+    padding: '8px',
+    borderRadius: '8px',
+    border: '1px solid #334155',
+    background: '#1e293b',
+    color: '#94a3b8',
+    fontSize: '12px',
+    cursor: 'pointer',
+    transition: 'all 0.2s',
+  }}
+  onMouseEnter={(e) => {
+    e.currentTarget.style.background = '#334155';
+    e.currentTarget.style.color = 'white';
+  }}
+  onMouseLeave={(e) => {
+    e.currentTarget.style.background = '#1e293b';
+    e.currentTarget.style.color = '#94a3b8';
+  }}
+>
+  📍 Use my current location as start
+</button>
       </div>
 
       {/* ── Info + Fare Panel ── */}
