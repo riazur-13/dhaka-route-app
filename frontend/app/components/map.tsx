@@ -4,7 +4,8 @@ import { useState } from 'react';
 import { MapContainer, TileLayer, Marker, Polyline, useMapEvents } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
-import { fetchRoute, submitFare, getAverageFare } from '../lib/osrm';
+import { fetchRoute, submitFare, getAverageFare, reverseGeocode } from '../lib/osrm';
+import SearchBox from './SearchBox';
 
 const startIcon = L.divIcon({
   className: '',
@@ -49,50 +50,87 @@ export default function Map() {
   const [routeData, setRouteData] = useState<RouteData | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // Fare submission state
+  // Search box display values — updated by both click and search
+  const [startName, setStartName] = useState('');
+  const [endName, setEndName] = useState('');
+
+  // Fare state
   const [fareInput, setFareInput] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [avgFare, setAvgFare] = useState<number | null>(null);
   const [submissionCount, setSubmissionCount] = useState(0);
 
+  async function getRoute(
+    startPoint: [number, number],
+    endPoint: [number, number]
+  ) {
+    setLoading(true);
+    const data = await fetchRoute(startPoint, endPoint);
+    if (data) {
+      setRouteData(data);
+      const avg = await getAverageFare(toKm(data.distance), 'rickshaw');
+      setAvgFare(avg.average_fare);
+      setSubmissionCount(avg.submission_count);
+    }
+    setLoading(false);
+  }
+
+  // Called when user clicks on the map
   async function handleMapClick(lat: number, lng: number) {
+    // Get place name for this coordinate
+    const name = await reverseGeocode(lat, lng);
+
     if (!start) {
       setStart([lat, lng]);
+      setStartName(name); // ← show in search box
     } else if (!end) {
-      setEnd([lat, lng]);
-      setLoading(true);
-
-      const data = await fetchRoute(start, [lat, lng]);
-      if (data) {
-        setRouteData(data);
-        // Fetch existing average fare for this distance
-        const avg = await getAverageFare(toKm(data.distance), 'rickshaw');
-        setAvgFare(avg.average_fare);
-        setSubmissionCount(avg.submission_count);
-      }
-
-      setLoading(false);
+      const endPoint: [number, number] = [lat, lng];
+      setEnd(endPoint);
+      setEndName(name); // ← show in search box
+      await getRoute(start, endPoint);
     } else {
+      // Reset
       setStart([lat, lng]);
       setEnd(null);
+      setStartName(name);
+      setEndName('');
       setRouteData(null);
       setAvgFare(null);
       setFareInput('');
     }
   }
 
+  // Called when user selects from SearchBox dropdown
+  async function handleSearchSelect(
+    type: 'start' | 'end',
+    lat: number,
+    lng: number,
+    name: string
+  ) {
+    const point: [number, number] = [lat, lng];
+
+    if (type === 'start') {
+      setStart(point);
+      setStartName(name);
+      setRouteData(null);
+      setAvgFare(null);
+      if (end) await getRoute(point, end);
+    } else {
+      setEnd(point);
+      setEndName(name);
+      setRouteData(null);
+      setAvgFare(null);
+      if (start) await getRoute(start, point);
+    }
+  }
+
   async function handleFareSubmit() {
     if (!routeData || !fareInput) return;
-
     setSubmitting(true);
-
     await submitFare(toKm(routeData.distance), parseFloat(fareInput), 'rickshaw');
-
-    // Refresh the average after submitting
     const avg = await getAverageFare(toKm(routeData.distance), 'rickshaw');
     setAvgFare(avg.average_fare);
     setSubmissionCount(avg.submission_count);
-
     setFareInput('');
     setSubmitting(false);
   }
@@ -100,7 +138,39 @@ export default function Map() {
   return (
     <div style={{ position: 'relative', width: '100%', height: '100vh' }}>
 
-      {/* Info + fare panel — top right */}
+      {/* ── Search Panel ── */}
+      <div style={{
+        position: 'absolute',
+        top: '16px',
+        left: '50%',
+        transform: 'translateX(-50%)',
+        zIndex: 1000,
+        background: 'rgba(15,23,42,0.95)',
+        padding: '12px 16px',
+        borderRadius: '12px',
+        backdropFilter: 'blur(8px)',
+        border: '1px solid #334155',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '8px',
+        width: '320px',
+      }}>
+        <SearchBox
+          placeholder="From — search or click map"
+          color="green"
+          value={startName}
+          onSelect={(lat, lng, name) => handleSearchSelect('start', lat, lng, name)}
+        />
+        <div style={{ height: '1px', background: '#334155' }} />
+        <SearchBox
+          placeholder="To — search or click map"
+          color="amber"
+          value={endName}
+          onSelect={(lat, lng, name) => handleSearchSelect('end', lat, lng, name)}
+        />
+      </div>
+
+      {/* ── Info + Fare Panel ── */}
       {routeData && (
         <div style={{
           position: 'absolute',
@@ -117,7 +187,6 @@ export default function Map() {
           minWidth: '220px',
           border: '1px solid #334155',
         }}>
-          {/* Walking */}
           <div>
             <p style={{ color: '#22c55e', fontWeight: 700, fontSize: '13px', marginBottom: '4px' }}>
               🚶 Walking
@@ -129,7 +198,6 @@ export default function Map() {
 
           <div style={{ height: '1px', background: '#334155' }} />
 
-          {/* Rickshaw */}
           <div>
             <p style={{ color: '#f59e0b', fontWeight: 700, fontSize: '13px', marginBottom: '4px' }}>
               🛺 Rickshaw
@@ -138,10 +206,10 @@ export default function Map() {
               {toKm(routeData.distance)} km
             </p>
 
-            {/* Crowdsourced average fare */}
             {avgFare ? (
               <p style={{ color: '#f59e0b', fontSize: '14px', marginTop: '6px', fontWeight: 600 }}>
-                ৳{avgFare} avg <span style={{ color: '#94a3b8', fontWeight: 400, fontSize: '12px' }}>
+                ৳{avgFare} avg{' '}
+                <span style={{ color: '#94a3b8', fontWeight: 400, fontSize: '12px' }}>
                   ({submissionCount} trip{submissionCount !== 1 ? 's' : ''})
                 </span>
               </p>
@@ -151,7 +219,6 @@ export default function Map() {
               </p>
             )}
 
-            {/* Fare submission input */}
             <div style={{ display: 'flex', gap: '6px', marginTop: '10px' }}>
               <input
                 type="number"
@@ -190,11 +257,11 @@ export default function Map() {
         </div>
       )}
 
-      {/* Loading indicator */}
+      {/* ── Loading ── */}
       {loading && (
         <div style={{
           position: 'absolute',
-          top: '16px',
+          bottom: '40px',
           left: '50%',
           transform: 'translateX(-50%)',
           zIndex: 1000,
@@ -208,7 +275,7 @@ export default function Map() {
         </div>
       )}
 
-      {/* Legend */}
+      {/* ── Legend ── */}
       <div style={{
         position: 'absolute',
         bottom: '32px',
@@ -231,27 +298,6 @@ export default function Map() {
           🛺 Rickshaw
         </div>
       </div>
-
-      {/* Click hints */}
-      {!start && (
-        <div style={{
-          position: 'absolute', top: '16px', left: '50%', transform: 'translateX(-50%)',
-          zIndex: 1000, background: 'rgba(15,23,42,0.9)', color: 'white',
-          padding: '8px 16px', borderRadius: '8px', fontSize: '13px', whiteSpace: 'nowrap',
-        }}>
-          📍 Click to set start point
-        </div>
-      )}
-
-      {start && !end && (
-        <div style={{
-          position: 'absolute', top: '16px', left: '50%', transform: 'translateX(-50%)',
-          zIndex: 1000, background: 'rgba(15,23,42,0.9)', color: 'white',
-          padding: '8px 16px', borderRadius: '8px', fontSize: '13px', whiteSpace: 'nowrap',
-        }}>
-          🏁 Click to set destination
-        </div>
-      )}
 
       <MapContainer
         center={[23.8103, 90.4125]}

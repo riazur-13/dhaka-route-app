@@ -45,3 +45,20 @@ export async function getAverageFare(
   const res = await fetch(url);
   return res.json();
 }
+export async function searchPlace(query: string) {
+  const url = `${API_BASE}/search?query=${encodeURIComponent(query)}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  return data.results as {
+    name: string;
+    full_name: string;
+    lat: number;
+    lng: number;
+  }[];
+}
+export async function reverseGeocode(lat: number, lng: number): Promise<string> {
+  const url = `${API_BASE}/reverse-geocode?lat=${lat}&lng=${lng}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  return data.name || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+}
