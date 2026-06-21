@@ -4,8 +4,7 @@ import { useState } from 'react';
 import { MapContainer, TileLayer, Marker, Polyline, useMapEvents } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
-import { fetchRoute, submitFare, getAverageFare, reverseGeocode } from '../lib/osrm';
-import SearchBox from './SearchBox';
+import { fetchRoute, submitFare, getAverageFare, reverseGeocode, getAIRecommendation } from '../lib/osrm';import SearchBox from './SearchBox';
 
 const startIcon = L.divIcon({
   className: '',
@@ -60,6 +59,10 @@ export default function Map() {
   const [avgFare, setAvgFare] = useState<number | null>(null);
   const [submissionCount, setSubmissionCount] = useState(0);
 
+  // state for AI recommendation
+  const [aiRecommendation, setAiRecommendation] = useState<string | null>(null);
+
+
   // Add this function inside your Map component
 function handleCurrentLocation() {
   if (!navigator.geolocation) {
@@ -91,19 +94,23 @@ function handleCurrentLocation() {
 }
 
   async function getRoute(
-    startPoint: [number, number],
-    endPoint: [number, number]
-  ) {
-    setLoading(true);
-    const data = await fetchRoute(startPoint, endPoint);
-    if (data) {
-      setRouteData(data);
-      const avg = await getAverageFare(toKm(data.distance), 'rickshaw');
-      setAvgFare(avg.average_fare);
-      setSubmissionCount(avg.submission_count);
-    }
-    setLoading(false);
+  startPoint: [number, number],
+  endPoint: [number, number]
+) {
+  setLoading(true);
+  const data = await fetchRoute(startPoint, endPoint);
+  if (data) {
+    setRouteData(data);
+    const avg = await getAverageFare(toKm(data.distance), 'rickshaw');
+    setAvgFare(avg.average_fare);
+    setSubmissionCount(avg.submission_count);
+
+    // Get AI recommendation
+    const ai = await getAIRecommendation(toKm(data.distance), 'rickshaw', endName || 'Dhaka');
+    setAiRecommendation(ai);
   }
+  setLoading(false);
+}
 
   // Called when user clicks on the map
   async function handleMapClick(lat: number, lng: number) {
@@ -127,6 +134,7 @@ function handleCurrentLocation() {
       setRouteData(null);
       setAvgFare(null);
       setFareInput('');
+      setAiRecommendation(null);
     }
   }
 
@@ -150,6 +158,7 @@ function handleCurrentLocation() {
       setEndName(name);
       setRouteData(null);
       setAvgFare(null);
+      setAiRecommendation(null);
       if (start) await getRoute(start, point);
     }
   }
@@ -295,6 +304,7 @@ function handleCurrentLocation() {
                   fontSize: '13px',
                   width: '100px',
                 }}
+
               />
               <button
                 onClick={handleFareSubmit}
@@ -316,6 +326,23 @@ function handleCurrentLocation() {
           </div>
         </div>
       )}
+      {/* AI Recommendation */}
+{aiRecommendation && (
+  <div style={{
+    marginTop: '8px',
+    padding: '10px 12px',
+    background: '#0f172a',
+    borderRadius: '8px',
+    border: '1px solid #6366f1',
+  }}>
+    <p style={{ color: '#6366f1', fontWeight: 700, fontSize: '12px', marginBottom: '6px' }}>
+      🤖 AI Recommendation
+    </p>
+    <p style={{ color: '#cbd5e1', fontSize: '12px', lineHeight: '1.5' }}>
+      {aiRecommendation}
+    </p>
+  </div>
+)}
 
       {/* ── Loading ── */}
       {loading && (

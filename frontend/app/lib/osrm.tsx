@@ -62,3 +62,13 @@ export async function reverseGeocode(lat: number, lng: number): Promise<string> 
   const data = await res.json();
   return data.name || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
 }
+export async function getAIRecommendation(
+  distanceKm: number,
+  routeType: string,
+  area: string
+): Promise<string> {
+  const url = `${API_BASE}/ai-fare-recommendation?distance_km=${distanceKm}&route_type=${routeType}&area=${encodeURIComponent(area)}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  return data.recommendation;
+}
