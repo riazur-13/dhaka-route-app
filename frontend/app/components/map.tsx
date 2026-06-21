@@ -4,7 +4,8 @@ import { useState } from 'react';
 import { MapContainer, TileLayer, Marker, Polyline, useMapEvents } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
-import { fetchRoute, submitFare, getAverageFare, reverseGeocode, getAIRecommendation } from '../lib/osrm';import SearchBox from './SearchBox';
+import { fetchRoute, submitFare, getAverageFare, reverseGeocode, getAIRecommendation } from '../lib/osrm';
+import SearchBox from './SearchBox';
 
 const startIcon = L.divIcon({
   className: '',
@@ -49,84 +50,75 @@ export default function Map() {
   const [routeData, setRouteData] = useState<RouteData | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // Search box display values — updated by both click and search
   const [startName, setStartName] = useState('');
   const [endName, setEndName] = useState('');
 
-  // Fare state
   const [fareInput, setFareInput] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [avgFare, setAvgFare] = useState<number | null>(null);
   const [submissionCount, setSubmissionCount] = useState(0);
 
-  // state for AI recommendation
   const [aiRecommendation, setAiRecommendation] = useState<string | null>(null);
 
-
-  // Add this function inside your Map component
-function handleCurrentLocation() {
-  if (!navigator.geolocation) {
-    alert('Geolocation is not supported by your browser');
-    return;
-  }
-
-  navigator.geolocation.getCurrentPosition(
-    async (position) => {
-      const lat = position.coords.latitude;
-      const lng = position.coords.longitude;
-
-      // Get place name for current location
-      const name = await reverseGeocode(lat, lng);
-
-      setStart([lat, lng]);
-      setStartName(name);
-      setRouteData(null);
-      setAvgFare(null);
-
-      // If end already set, fetch route immediately
-      if (end) await getRoute([lat, lng], end);
-    },
-    (error) => {
-      alert('Could not get your location. Please allow location access.');
-      console.error(error);
+  function handleCurrentLocation() {
+    if (!navigator.geolocation) {
+      alert('Geolocation is not supported by your browser');
+      return;
     }
-  );
-}
+
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const lat = position.coords.latitude;
+        const lng = position.coords.longitude;
+        const name = await reverseGeocode(lat, lng);
+        setStart([lat, lng]);
+        setStartName(name);
+        setRouteData(null);
+        setAvgFare(null);
+        setAiRecommendation(null);
+        if (end) await getRoute([lat, lng], end);
+      },
+      (error) => {
+        const messages: Record<number, string> = {
+          1: 'Permission denied — please allow location access in your browser settings',
+          2: 'Location unavailable — could not detect your position',
+          3: 'Request timed out — please try again',
+        };
+        alert(messages[error.code] || 'Could not get your location');
+        console.error('Geolocation error code:', error.code, error.message);
+      }
+    );
+  }
 
   async function getRoute(
-  startPoint: [number, number],
-  endPoint: [number, number]
-) {
-  setLoading(true);
-  const data = await fetchRoute(startPoint, endPoint);
-  if (data) {
-    setRouteData(data);
-    const avg = await getAverageFare(toKm(data.distance), 'rickshaw');
-    setAvgFare(avg.average_fare);
-    setSubmissionCount(avg.submission_count);
-
-    // Get AI recommendation
-    const ai = await getAIRecommendation(toKm(data.distance), 'rickshaw', endName || 'Dhaka');
-    setAiRecommendation(ai);
+    startPoint: [number, number],
+    endPoint: [number, number]
+  ) {
+    setLoading(true);
+    const data = await fetchRoute(startPoint, endPoint);
+    if (data) {
+      setRouteData(data);
+      const avg = await getAverageFare(toKm(data.distance), 'rickshaw');
+      setAvgFare(avg.average_fare);
+      setSubmissionCount(avg.submission_count);
+      const ai = await getAIRecommendation(toKm(data.distance), 'rickshaw', endName || 'Dhaka');
+      setAiRecommendation(ai);
+    }
+    setLoading(false);
   }
-  setLoading(false);
-}
 
-  // Called when user clicks on the map
   async function handleMapClick(lat: number, lng: number) {
-    // Get place name for this coordinate
     const name = await reverseGeocode(lat, lng);
 
     if (!start) {
       setStart([lat, lng]);
-      setStartName(name); // ← show in search box
+      setStartName(name);
     } else if (!end) {
       const endPoint: [number, number] = [lat, lng];
       setEnd(endPoint);
-      setEndName(name); // ← show in search box
+      setEndName(name);
       await getRoute(start, endPoint);
     } else {
-      // Reset
       setStart([lat, lng]);
       setEnd(null);
       setStartName(name);
@@ -138,7 +130,6 @@ function handleCurrentLocation() {
     }
   }
 
-  // Called when user selects from SearchBox dropdown
   async function handleSearchSelect(
     type: 'start' | 'end',
     lat: number,
@@ -152,6 +143,7 @@ function handleCurrentLocation() {
       setStartName(name);
       setRouteData(null);
       setAvgFare(null);
+      setAiRecommendation(null);
       if (end) await getRoute(point, end);
     } else {
       setEnd(point);
@@ -173,7 +165,6 @@ function handleCurrentLocation() {
     setFareInput('');
     setSubmitting(false);
   }
-  
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100vh' }}>
@@ -208,35 +199,36 @@ function handleCurrentLocation() {
           value={endName}
           onSelect={(lat, lng, name) => handleSearchSelect('end', lat, lng, name)}
         />
+
         {/* Current location button */}
-<button
-  onClick={handleCurrentLocation}
-  style={{
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: '6px',
-    width: '100%',
-    padding: '8px',
-    borderRadius: '8px',
-    border: '1px solid #334155',
-    background: '#1e293b',
-    color: '#94a3b8',
-    fontSize: '12px',
-    cursor: 'pointer',
-    transition: 'all 0.2s',
-  }}
-  onMouseEnter={(e) => {
-    e.currentTarget.style.background = '#334155';
-    e.currentTarget.style.color = 'white';
-  }}
-  onMouseLeave={(e) => {
-    e.currentTarget.style.background = '#1e293b';
-    e.currentTarget.style.color = '#94a3b8';
-  }}
->
-  📍 Use my current location as start
-</button>
+        <button
+          onClick={handleCurrentLocation}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '6px',
+            width: '100%',
+            padding: '8px',
+            borderRadius: '8px',
+            border: '1px solid #334155',
+            background: '#1e293b',
+            color: '#94a3b8',
+            fontSize: '12px',
+            cursor: 'pointer',
+            transition: 'all 0.2s',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = '#334155';
+            e.currentTarget.style.color = 'white';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = '#1e293b';
+            e.currentTarget.style.color = '#94a3b8';
+          }}
+        >
+          📍 Use my current location as start
+        </button>
       </div>
 
       {/* ── Info + Fare Panel ── */}
@@ -254,8 +246,13 @@ function handleCurrentLocation() {
           flexDirection: 'column',
           gap: '12px',
           minWidth: '220px',
+          maxWidth: '260px',
+          maxHeight: '90vh',
+          overflowY: 'auto',
           border: '1px solid #334155',
         }}>
+
+          {/* Walking */}
           <div>
             <p style={{ color: '#22c55e', fontWeight: 700, fontSize: '13px', marginBottom: '4px' }}>
               🚶 Walking
@@ -267,6 +264,7 @@ function handleCurrentLocation() {
 
           <div style={{ height: '1px', background: '#334155' }} />
 
+          {/* Rickshaw */}
           <div>
             <p style={{ color: '#f59e0b', fontWeight: 700, fontSize: '13px', marginBottom: '4px' }}>
               🛺 Rickshaw
@@ -288,6 +286,7 @@ function handleCurrentLocation() {
               </p>
             )}
 
+            {/* Fare input */}
             <div style={{ display: 'flex', gap: '6px', marginTop: '10px' }}>
               <input
                 type="number"
@@ -304,7 +303,6 @@ function handleCurrentLocation() {
                   fontSize: '13px',
                   width: '100px',
                 }}
-
               />
               <button
                 onClick={handleFareSubmit}
@@ -324,25 +322,42 @@ function handleCurrentLocation() {
               </button>
             </div>
           </div>
+
+          {/* AI Recommendation — inside info panel */}
+          {aiRecommendation && (
+            <>
+              <div style={{ height: '1px', background: '#334155' }} />
+              <div style={{
+                padding: '12px',
+                background: '#0f172a',
+                borderRadius: '8px',
+                border: '1px solid #6366f1',
+              }}>
+                <p style={{
+                  color: '#818cf8',
+                  fontWeight: 700,
+                  fontSize: '12px',
+                  marginBottom: '6px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                }}>
+                  🤖 AI পরামর্শ
+                </p>
+                <p style={{
+                  color: '#e2e8f0',
+                  fontSize: '13px',
+                  lineHeight: '1.8',
+                  fontFamily: '"Noto Sans Bengali", sans-serif',
+                }}>
+                  {aiRecommendation}
+                </p>
+              </div>
+            </>
+          )}
+
         </div>
       )}
-      {/* AI Recommendation */}
-{aiRecommendation && (
-  <div style={{
-    marginTop: '8px',
-    padding: '10px 12px',
-    background: '#0f172a',
-    borderRadius: '8px',
-    border: '1px solid #6366f1',
-  }}>
-    <p style={{ color: '#6366f1', fontWeight: 700, fontSize: '12px', marginBottom: '6px' }}>
-      🤖 AI Recommendation
-    </p>
-    <p style={{ color: '#cbd5e1', fontSize: '12px', lineHeight: '1.5' }}>
-      {aiRecommendation}
-    </p>
-  </div>
-)}
 
       {/* ── Loading ── */}
       {loading && (

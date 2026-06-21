@@ -197,7 +197,7 @@ async def ai_fare_recommendation(
     )
 
     prompt = f"""You are a helpful Dhaka transport assistant.
-Give a short, friendly rickshaw fare recommendation.
+Give a short, friendly rickshaw fare recommendation in Bengali (বাংলা) language only.
 
 Trip details:
 - Distance: {distance_km} km
@@ -206,7 +206,7 @@ Trip details:
 - {fare_context}
 
 Give a recommended fare range in BDT and one bargaining tip.
-Keep it under 3 sentences. Be specific and helpful."""
+Keep it under 3 sentences. Write only in Bengali language."""
 
     try:
         response = groq_client.chat.completions.create(
