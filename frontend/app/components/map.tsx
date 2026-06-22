@@ -298,8 +298,10 @@ export default function Map() {
             </p>
             <p style={{ color: "white", fontSize: "15px", fontWeight: 600 }}>
               {toKm(routeData.distance)} km ·{" "}
-              {formatWalkingTime(routeData.duration, toKm(routeData.distance))}{" "}
-              min
+              {formatWalkingTime(
+                routeData.duration,
+                toKm(routeData.distance),
+              )}{" "}
             </p>
           </div>
 
