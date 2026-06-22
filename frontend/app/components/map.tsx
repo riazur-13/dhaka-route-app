@@ -50,10 +50,20 @@ function toKm(metres: number) {
   return parseFloat((metres / 1000).toFixed(1));
 }
 
-function formatWalkingTime(seconds: number, distanceKm: number) {
-  // Walking speed average = 5km/h = 83m/min
-  const realisticMins = Math.round((distanceKm / 5) * 60);
-  return `${realisticMins} min`;
+function formatWalkingTime(seconds?: number, distanceKm?: number) {
+  let minutes: number;
+
+  if (seconds) {
+    minutes = Math.round(seconds / 60);
+  } else if (distanceKm) {
+    minutes = Math.round((distanceKm / 5) * 60); // 5 km/h walking speed
+  } else {
+    return "N/A";
+  }
+
+  return minutes < 60
+    ? `${minutes} min`
+    : `${Math.floor(minutes / 60)} hr${minutes % 60 ? ` ${minutes % 60} min` : ""}`;
 }
 
 interface RouteData {
