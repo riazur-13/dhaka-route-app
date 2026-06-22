@@ -349,7 +349,7 @@ export default function Map() {
               </p>
             )}
             {/* Rickshaw distance warning */}
-            {toKm(routeData.distance) > 5 && (
+            {toKm(routeData.distance) > 15 && (
               <div
                 style={{
                   marginTop: "6px",
