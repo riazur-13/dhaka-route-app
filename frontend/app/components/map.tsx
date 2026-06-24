@@ -50,16 +50,12 @@ function toKm(metres: number) {
   return parseFloat((metres / 1000).toFixed(1));
 }
 
-function formatWalkingTime(seconds?: number, distanceKm?: number) {
-  let minutes: number;
+function formatWalkingTime(distanceKm?: number) {
+  if (!distanceKm) return "N/A";
 
-  if (seconds) {
-    minutes = Math.round(seconds / 60);
-  } else if (distanceKm) {
-    minutes = Math.round((distanceKm / 5) * 60); // 5 km/h walking speed
-  } else {
-    return "N/A";
-  }
+  const WALKING_SPEED_KMH = 4.5; // Realistic walking speed
+  const hours = distanceKm / WALKING_SPEED_KMH;
+  const minutes = Math.round(hours * 60);
 
   return minutes < 60
     ? `${minutes} min`
@@ -308,10 +304,7 @@ export default function Map() {
             </p>
             <p style={{ color: "white", fontSize: "15px", fontWeight: 600 }}>
               {toKm(routeData.distance)} km ·{" "}
-              {formatWalkingTime(
-                routeData.duration,
-                toKm(routeData.distance),
-              )}{" "}
+              {formatWalkingTime(toKm(routeData.distance))}
             </p>
           </div>
 
