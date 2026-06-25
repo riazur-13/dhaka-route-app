@@ -167,7 +167,6 @@ async def reverse_geocode(lat: float, lng: float):
 
     return {"name": name}
 
-
 @app.get("/ai-fare-recommendation")
 async def ai_fare_recommendation(
     distance_km: float,
@@ -196,6 +195,19 @@ async def ai_fare_recommendation(
         else "No crowdsourced fare data available yet."
     )
 
+    # --- ADD SPECIAL RULE FOR LONG ROAMING TOURS ---
+    if distance_km > 10.0:
+        roaming_instruction = """
+        IMPORTANT CRITICAL EXTRA DIRECTION:
+        This trip is exceptionally long (over 10 km). In Dhaka, a point-to-point rickshaw trip is rarely this long. 
+        Assume the user wants to roam around the city, take a scenic route, or book the rickshaw for a long time. 
+        - Do NOT calculate using basic low rates (e.g., 200 Tk is too low for 17 km).
+        - Recommend a significantly higher premium total (e.g., 500-800+ Tk) or explicitly advise bargaining for an hourly rate (e.g., 150-200 Tk per hour) because pulling a rickshaw for this distance requires immense physical effort.
+        """
+    else:
+        roaming_instruction = "Give a standard fair price suggestion based on typical Dhaka rickshaw rates (roughly 35-50 Tk per km depending on the area)."
+
+    # --- UPDATED SYSTEM PROMPT ---
     prompt = f"""You are a helpful Dhaka transport assistant.
 Give a short, friendly rickshaw fare recommendation in Bengali (বাংলা) language only.
 
@@ -205,14 +217,18 @@ Trip details:
 - Area: {area}, Dhaka, Bangladesh
 - {fare_context}
 
+{roaming_instruction}
+
 Give a recommended fare range in BDT and one bargaining tip.
-Keep it under 3 sentences. Write only in Bengali language."""
+Make sure your response is a completely finished paragraph. Do not leave the last sentence incomplete or cut off mid-way. Write only in Bengali."""
+
 
     try:
         response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=150,
+            max_tokens=1024, 
+            temperature=0.3,
         )
         recommendation = response.choices[0].message.content
         return {"recommendation": recommendation}
