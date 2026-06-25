@@ -411,13 +411,24 @@ export default function Map() {
           {/* AI Recommendation — inside info panel */}
           {aiRecommendation && (
             <>
-              <div style={{ height: "1px", background: "#334155" }} />
+              <div
+                style={{
+                  height: "1px",
+                  background: "#334155",
+                  margin: "8px 0",
+                }}
+              />
               <div
                 style={{
                   padding: "12px",
                   background: "#0f172a",
                   borderRadius: "8px",
                   border: "1px solid #6366f1",
+                  height: "auto", // Let it expand naturally based on content
+                  minHeight: "fit-content", // Ensure it respects the content layout
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "6px",
                 }}
               >
                 <p
@@ -425,7 +436,7 @@ export default function Map() {
                     color: "#818cf8",
                     fontWeight: 700,
                     fontSize: "12px",
-                    marginBottom: "6px",
+                    marginBottom: "2px",
                     display: "flex",
                     alignItems: "center",
                     gap: "4px",
@@ -437,9 +448,11 @@ export default function Map() {
                   style={{
                     color: "#e2e8f0",
                     fontSize: "13px",
-                    lineHeight: "1.8",
+                    lineHeight: "1.6",
                     fontFamily: '"Noto Sans Bengali", sans-serif',
                     whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                    margin: 0,
                   }}
                 >
                   {aiRecommendation}
