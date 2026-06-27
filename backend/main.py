@@ -3,15 +3,28 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
 import os
+import json  # 💡 Cleanly imported at the top now
 from dotenv import load_dotenv
 from groq import Groq
 from database import init_db, get_connection
+import math
 
 load_dotenv()
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 app = FastAPI()
+
+def calculate_logical_bounds(distance_km: float) -> tuple[float, float]:
+    if distance_km <= 5.0:
+        # Standard: 35-55 Tk per Km
+        return (distance_km * 25, distance_km * 65)
+    elif 5.0 < distance_km <= 12.0:
+        # Medium distance fatigue premium
+        return (distance_km * 35, distance_km * 85)
+    else:
+        # Extreme distances (30km+ roaming packages)
+        return (distance_km * 50, distance_km * 120)
 
 app.add_middleware(
     CORSMiddleware,
@@ -62,6 +75,77 @@ class FareSubmission(BaseModel):
 
 @app.post("/fares")
 def submit_fare(submission: FareSubmission):
+    if submission.distance_km <= 0 or submission.fare_amount <= 0:
+        raise HTTPException(status_code=400, detail="Invalid distance or fare amount.")
+        
+    min_logical, max_logical = calculate_logical_bounds(submission.distance_km)
+    
+    # Pre-filter out completely unhinged submissions (e.g. 50 Tk for 30km or 10,000 Tk for 2km)
+    if submission.fare_amount < (min_logical * 0.5) or submission.fare_amount > (max_logical * 2.0):
+        raise HTTPException(
+            status_code=400, 
+            detail="Submission rejected. The fare entered is outside a realistic range for this distance."
+        )
+
+    # 2. AI RESEARCH & VALIDATION PROMPT (Deep Context Verification)
+    # 2. AI RESEARCH & VALIDATION PROMPT (Deep Context Verification)
+    validation_prompt = f"""You are a strict data validation assistant for Dhaka transport metrics.
+Your job is to determine if a crowdsourced fare submission is realistic or if it's fake/spam.
+
+Trip Parameters:
+- Distance: {submission.distance_km} km
+- Mode of Travel: {submission.route_type}
+- Fare Submitted by User: ৳{submission.fare_amount} BDT
+
+System Reference Benchmarks:
+- For this specific distance, a realistic fare fallback window is between ৳{round(min_logical, 2)} and ৳{round(max_logical, 2)} BDT.
+- Consider context: A manual rickshaw requires significant human physical exertion over {submission.distance_km} km, meaning fair demand/fatigue premiums or bad weather inflation can naturally push the fare towards the mid-to-higher end of the window.
+- Reject only if the value is completely unhinged spam (e.g., trying to pay ৳50 for 20 km, or ৳2000 for 2 km).
+
+Evaluate the authenticity. Respond strictly in JSON format matching this schema:
+{{
+  "is_valid": true or false,
+  "reason": "A one-sentence explanation in English explaining why the fare is fair or fake."
+}}
+Do not write any introductory or trailing text outside of the JSON block."""
+
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": validation_prompt}],
+            max_tokens=100,
+            temperature=0.1, 
+            response_format={"type": "json_object"} 
+        )
+        
+        content = response.choices[0].message.content
+        
+        if not content:
+            raise HTTPException(status_code=500, detail="AI backend returned an empty response.")
+            
+        result_data = json.loads(content)
+        
+        # 3. IF AI DETECTS ANOMALY / FAKE USER -> REJECT IT
+        if not result_data.get("is_valid", True):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"AI Validation Failed: {result_data.get('reason', 'Unrealistic data entry detected.')}"
+            )
+
+    except json.JSONDecodeError:
+        # If the LLM output is not valid JSON, we fall back to a safe backup range-check check
+        if not (min_logical <= submission.fare_amount <= max_logical):
+            raise HTTPException(status_code=400, detail="Fare entry validation failed JSON structuring.")
+   
+    except HTTPException as he:
+        # Pass our intentional custom HTTP exceptions straight through
+        raise he
+    except Exception as e:
+        # System fallback fallback safety rule
+        if not (min_logical <= submission.fare_amount <= max_logical):
+            raise HTTPException(status_code=400, detail="Fare value evaluation failed structural checks.")
+
+    # 4. DATA SAVED ONLY IF VALIDATION CHECKS PASS SUCCESSFULLY
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
@@ -70,7 +154,8 @@ def submit_fare(submission: FareSubmission):
     )
     conn.commit()
     conn.close()
-    return {"message": "Fare submitted successfully"}
+    
+    return {"message": "Thank you! Your verified fare submission has been saved to help other commuters."}
 
 
 @app.get("/fares/average")
@@ -195,7 +280,6 @@ async def ai_fare_recommendation(
         else "No crowdsourced fare data available yet."
     )
 
-    # --- ADD SPECIAL RULE FOR LONG ROAMING TOURS ---
     if distance_km > 10.0:
         roaming_instruction = """
         IMPORTANT CRITICAL EXTRA DIRECTION:
@@ -207,7 +291,6 @@ async def ai_fare_recommendation(
     else:
         roaming_instruction = "Give a standard fair price suggestion based on typical Dhaka rickshaw rates (roughly 35-50 Tk per km depending on the area)."
 
-    # --- UPDATED SYSTEM PROMPT ---
     prompt = f"""You are a helpful Dhaka transport assistant.
 Give a short, friendly rickshaw fare recommendation in Bengali (বাংলা) language only.
 
@@ -221,7 +304,6 @@ Trip details:
 
 Give a recommended fare range in BDT and one bargaining tip.
 Make sure your response is a completely finished paragraph. Do not leave the last sentence incomplete or cut off mid-way. Write only in Bengali."""
-
 
     try:
         response = groq_client.chat.completions.create(
