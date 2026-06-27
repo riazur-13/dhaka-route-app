@@ -7,6 +7,7 @@ import {
   Marker,
   Polyline,
   useMapEvents,
+  Popup,
 } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import L from "leaflet";
@@ -18,6 +19,7 @@ import {
   getAIRecommendation,
 } from "../lib/osrm";
 import SearchBox from "./SearchBox";
+import { RICKSHAW_STANDS } from "../lib/rickshawStands";
 
 const startIcon = L.divIcon({
   className: "",
@@ -31,6 +33,24 @@ const endIcon = L.divIcon({
   html: '<div style="width:16px;height:16px;background:#ef4444;border:3px solid white;border-radius:50%;box-shadow:0 2px 6px rgba(0,0,0,0.4)"></div>',
   iconSize: [16, 16],
   iconAnchor: [8, 8],
+});
+const standIcon = L.divIcon({
+  className: "",
+  html: `<div style="
+    width: 24px;
+    height: 24px;
+    background: #f59e0b;
+    border: 2px solid white;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+    cursor: pointer;
+  ">🛺</div>`,
+  iconSize: [24, 24],
+  iconAnchor: [12, 12],
 });
 
 function ClickHandler({
@@ -569,6 +589,46 @@ export default function Map() {
             dashArray="10, 10"
           />
         )}
+        {/* Rickshaw stand markers */}
+        {RICKSHAW_STANDS.map((stand) => (
+          <Marker
+            key={stand.id}
+            position={[stand.lat, stand.lng]}
+            icon={standIcon}
+          >
+            <Popup>
+              <div style={{ minWidth: "140px" }}>
+                <p
+                  style={{
+                    fontWeight: 700,
+                    fontSize: "14px",
+                    marginBottom: "4px",
+                    color: "#f59e0b",
+                  }}
+                >
+                  🛺 {stand.namebn}
+                </p>
+                <p
+                  style={{
+                    fontSize: "12px",
+                    color: "#94a3b8",
+                    marginBottom: "4px",
+                  }}
+                >
+                  {stand.name} — {stand.area}
+                </p>
+                <p
+                  style={{
+                    fontSize: "12px",
+                    color: "black",
+                  }}
+                >
+                  ⏱️ Wait: {stand.waitTime}
+                </p>
+              </div>
+            </Popup>
+          </Marker>
+        ))}
       </MapContainer>
     </div>
   );
