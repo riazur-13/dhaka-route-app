@@ -18,10 +18,10 @@ app = FastAPI()
 def calculate_logical_bounds(distance_km: float) -> tuple[float, float]:
     if distance_km <= 5.0:
         # Standard: 35-55 Tk per Km
-        return (distance_km * 25, distance_km * 65)
+        return (distance_km * 20, distance_km * 30)
     elif 5.0 < distance_km <= 12.0:
         # Medium distance fatigue premium
-        return (distance_km * 35, distance_km * 85)
+        return (distance_km * 30, distance_km * 40)
     else:
         # Extreme distances (30km+ roaming packages)
         return (distance_km * 50, distance_km * 120)
@@ -87,7 +87,7 @@ def submit_fare(submission: FareSubmission):
             detail="Submission rejected. The fare entered is outside a realistic range for this distance."
         )
 
-    # 2. AI RESEARCH & VALIDATION PROMPT (Deep Context Verification)
+    
     # 2. AI RESEARCH & VALIDATION PROMPT (Deep Context Verification)
     validation_prompt = f"""You are a strict data validation assistant for Dhaka transport metrics.
 Your job is to determine if a crowdsourced fare submission is realistic or if it's fake/spam.
