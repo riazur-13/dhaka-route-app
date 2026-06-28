@@ -289,7 +289,7 @@ async def ai_fare_recommendation(
         - Recommend a significantly higher premium total (e.g., 500-800+ Tk) or explicitly advise bargaining for an hourly rate (e.g., 150-200 Tk per hour) because pulling a rickshaw for this distance requires immense physical effort.
         """
     else:
-        roaming_instruction = "Give a standard fair price suggestion based on typical Dhaka rickshaw rates (roughly 35-50 Tk per km depending on the area)."
+        roaming_instruction = "Give a standard fair price suggestion based on typical Dhaka rickshaw rates (roughly 20-25 Tk per km depending on the area)."
 
     prompt = f"""You are a helpful Dhaka transport assistant.
 Give a short, friendly rickshaw fare recommendation in Bengali (বাংলা) language only.
