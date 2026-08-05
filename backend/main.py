@@ -291,7 +291,7 @@ async def ai_fare_recommendation(
     else:
         roaming_instruction = "Give a standard fair price suggestion based on typical Dhaka rickshaw rates (roughly 20-25 Tk per km depending on the area)."
 
-    prompt = f"""You are a helpful Dhaka transport assistant.
+   prompt = f"""You are a helpful Dhaka transport assistant.
 Give a short, friendly rickshaw fare recommendation in Bengali (বাংলা) language only.
 
 Trip details:
@@ -303,7 +303,7 @@ Trip details:
 {roaming_instruction}
 
 Give a recommended fare range in BDT and one bargaining tip.
-Make sure your response is a completely finished paragraph. Do not leave the last sentence incomplete or cut off mid-way. Write only in Bengali."""
+CRITICAL INSTRUCTION: Your entire response MUST be exactly 3 or 4 sentences long. Do not write less than 3 sentences, and do not write more than 4 sentences. Make sure the final sentence is complete. Write only in Bengali."""
 
     try:
         response = groq_client.chat.completions.create(
