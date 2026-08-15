@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings regardless of the committer's platform.
+# core.autocrlf is enabled on Windows checkouts here, and a CRLF shebang makes
+# Render's Linux container fail with "bad interpreter: /usr/bin/env bash^M".
+*.sh text eol=lf
