@@ -429,7 +429,7 @@ async def ai_fare_recommendation(
     else:
         roaming_instruction = "Give a standard fair price suggestion based on typical Dhaka rickshaw rates (roughly 20-25 Tk per km depending on the area)."
 
-   prompt = f"""You are a helpful Dhaka transport assistant.
+    prompt = f"""You are a helpful Dhaka transport assistant.
 Give a short, friendly rickshaw fare recommendation in Bengali (বাংলা) language only.
 
 Trip details:
