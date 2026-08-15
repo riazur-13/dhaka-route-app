@@ -20,21 +20,42 @@ export async function fetchRoute(
   };
 }
 
+export interface FareSubmitResult {
+  ok: boolean;
+  message: string;
+}
+
 export async function submitFare(
   distanceKm: number,
   fareAmount: number,
   routeType: 'walking' | 'rickshaw'
-) {
-  const res = await fetch(`${API_BASE}/fares`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      distance_km: distanceKm,
-      fare_amount: fareAmount,
-      route_type: routeType,
-    }),
-  });
-  return res.json();
+): Promise<FareSubmitResult> {
+  let res: Response;
+
+  try {
+    res = await fetch(`${API_BASE}/fares`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        distance_km: distanceKm,
+        fare_amount: fareAmount,
+        route_type: routeType,
+      }),
+    });
+  } catch {
+    return { ok: false, message: 'Could not reach the server. Check your connection and try again.' };
+  }
+
+  const data = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    // The backend rejects with a plain-string `detail` (range pre-filter or AI
+    // validation). FastAPI's own 422 sends an array instead, which we don't show.
+    const detail = typeof data?.detail === 'string' ? data.detail : null;
+    return { ok: false, message: detail || 'Your fare was rejected. Please double-check the amount.' };
+  }
+
+  return { ok: true, message: data?.message || 'Thanks! Your fare was saved.' };
 }
 
 export async function getAverageFare(

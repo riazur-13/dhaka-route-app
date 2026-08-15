@@ -17,6 +17,7 @@ import {
   getAverageFare,
   reverseGeocode,
   getAIRecommendation,
+  type FareSubmitResult,
 } from "../lib/osrm";
 import SearchBox from "./SearchBox";
 import { RICKSHAW_STANDS } from "../lib/rickshawStands";
@@ -99,6 +100,7 @@ export default function Map() {
 
   const [fareInput, setFareInput] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [fareStatus, setFareStatus] = useState<FareSubmitResult | null>(null);
   const [avgFare, setAvgFare] = useState<number | null>(null);
   const [submissionCount, setSubmissionCount] = useState(0);
 
@@ -120,7 +122,7 @@ export default function Map() {
         setRouteData(null);
         setAvgFare(null);
         setAiRecommendation(null);
-        if (end) await getRoute([lat, lng], end);
+        if (end) await getRoute([lat, lng], end, endName);
       },
       (error) => {
         const messages: Record<number, string> = {
@@ -134,11 +136,16 @@ export default function Map() {
     );
   }
 
+  // destinationName is passed in rather than read from endName state — callers
+  // often set the name and route in the same handler, so the state value would
+  // still be the previous render's.
   async function getRoute(
     startPoint: [number, number],
     endPoint: [number, number],
+    destinationName: string,
   ) {
     setLoading(true);
+    setFareStatus(null);
     const data = await fetchRoute(startPoint, endPoint);
     if (data) {
       setRouteData(data);
@@ -148,7 +155,7 @@ export default function Map() {
       const ai = await getAIRecommendation(
         toKm(data.distance),
         "rickshaw",
-        endName || "Dhaka",
+        destinationName || "Dhaka",
       );
       setAiRecommendation(ai);
     }
@@ -165,7 +172,7 @@ export default function Map() {
       const endPoint: [number, number] = [lat, lng];
       setEnd(endPoint);
       setEndName(name);
-      await getRoute(start, endPoint);
+      await getRoute(start, endPoint, name);
     } else {
       setStart([lat, lng]);
       setEnd(null);
@@ -174,6 +181,7 @@ export default function Map() {
       setRouteData(null);
       setAvgFare(null);
       setFareInput("");
+      setFareStatus(null);
       setAiRecommendation(null);
     }
   }
@@ -192,29 +200,37 @@ export default function Map() {
       setRouteData(null);
       setAvgFare(null);
       setAiRecommendation(null);
-      if (end) await getRoute(point, end);
+      if (end) await getRoute(point, end, endName);
     } else {
       setEnd(point);
       setEndName(name);
       setRouteData(null);
       setAvgFare(null);
       setAiRecommendation(null);
-      if (start) await getRoute(start, point);
+      if (start) await getRoute(start, point, name);
     }
   }
 
   async function handleFareSubmit() {
     if (!routeData || !fareInput) return;
     setSubmitting(true);
-    await submitFare(
+    setFareStatus(null);
+
+    const result = await submitFare(
       toKm(routeData.distance),
       parseFloat(fareInput),
       "rickshaw",
     );
-    const avg = await getAverageFare(toKm(routeData.distance), "rickshaw");
-    setAvgFare(avg.average_fare);
-    setSubmissionCount(avg.submission_count);
-    setFareInput("");
+    setFareStatus(result);
+
+    // On rejection the input is left intact so the user can correct the amount.
+    if (result.ok) {
+      const avg = await getAverageFare(toKm(routeData.distance), "rickshaw");
+      setAvgFare(avg.average_fare);
+      setSubmissionCount(avg.submission_count);
+      setFareInput("");
+    }
+
     setSubmitting(false);
   }
 
@@ -426,6 +442,29 @@ export default function Map() {
                 {submitting ? "..." : "Submit"}
               </button>
             </div>
+
+            {/* Submission result — surfaces backend range / AI validation rejections */}
+            {fareStatus && (
+              <div
+                style={{
+                  marginTop: "8px",
+                  padding: "8px 10px",
+                  borderRadius: "6px",
+                  background: fareStatus.ok ? "#052e16" : "#450a0a",
+                  border: `1px solid ${fareStatus.ok ? "#22c55e" : "#dc2626"}`,
+                }}
+              >
+                <p
+                  style={{
+                    color: fareStatus.ok ? "#86efac" : "#fca5a5",
+                    fontSize: "12px",
+                    lineHeight: "1.5",
+                  }}
+                >
+                  {fareStatus.ok ? "✅" : "⚠️"} {fareStatus.message}
+                </p>
+              </div>
+            )}
           </div>
 
           {/* AI Recommendation — inside info panel */}
