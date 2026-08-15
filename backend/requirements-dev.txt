@@ -1,0 +1,4 @@
+# Test-only dependencies. Kept out of requirements.txt so the deployed image
+# does not carry them. Install with:
+#   pip install -r requirements.txt -r requirements-dev.txt
+pytest==8.4.2
