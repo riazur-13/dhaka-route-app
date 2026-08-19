@@ -24,6 +24,9 @@ echo "Verifying main.py imports cleanly..."
 # A placeholder key keeps this independent of secrets. The Groq client refuses
 # to construct without an api_key, and module import is what we are checking
 # here — not credentials, and not any network call.
+#
+# No DATABASE_URL is needed either: the Postgres pool is built on first query,
+# not at import, precisely so this check stays offline.
 GROQ_API_KEY="${GROQ_API_KEY:-build-check-placeholder}" python -c "
 import main
 

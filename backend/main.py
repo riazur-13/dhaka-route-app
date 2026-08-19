@@ -2,16 +2,16 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from collections import deque
+from contextlib import asynccontextmanager
 import httpx
 import os
-import json  # 💡 Cleanly imported at the top now
+import json
 import logging
 import threading
 import time
 from dotenv import load_dotenv
 from groq import Groq
-from database import init_db, get_connection
-import math
+from database import close_pool, db_cursor, init_db
 
 load_dotenv()
 
@@ -19,7 +19,18 @@ logger = logging.getLogger(__name__)
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Deliberately not guarded by a try: if the schema cannot be created the
+    # service should refuse to start, rather than come up and return 500s on
+    # every fare submission.
+    init_db()
+    yield
+    close_pool()
+
+
+app = FastAPI(lifespan=lifespan)
 
 # (distance_km, min_taka_per_km, max_taka_per_km). The per-km rate climbs with
 # distance because a rickshaw puller's fatigue premium grows on longer trips,
@@ -170,10 +181,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.on_event("startup")
-def startup():
-    init_db()
-
 @app.get("/route")
 async def get_route(
     start_lat: float,
@@ -284,15 +291,12 @@ Do not write any introductory or trailing text outside of the JSON block."""
             raise HTTPException(status_code=400, detail="Fare value evaluation failed structural checks.")
 
     # 4. DATA SAVED ONLY IF VALIDATION CHECKS PASS SUCCESSFULLY
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO fare_submissions (distance_km, fare_amount, route_type) VALUES (?, ?, ?)",
-        (submission.distance_km, submission.fare_amount, submission.route_type),
-    )
-    conn.commit()
-    conn.close()
-    
+    with db_cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO fare_submissions (distance_km, fare_amount, route_type) VALUES (%s, %s, %s)",
+            (submission.distance_km, submission.fare_amount, submission.route_type),
+        )
+
     return {"message": "Thank you! Your verified fare submission has been saved to help other commuters."}
 
 
@@ -301,19 +305,19 @@ def get_average_fare(distance_km: float, route_type: str):
     min_dist = distance_km - 0.5
     max_dist = distance_km + 0.5
 
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT AVG(fare_amount), COUNT(*)
-        FROM fare_submissions
-        WHERE distance_km BETWEEN ? AND ?
-        AND route_type = ?
-        """,
-        (min_dist, max_dist, route_type),
-    )
-    avg_fare, count = cursor.fetchone()
-    conn.close()
+    with db_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT AVG(fare_amount), COUNT(*)
+            FROM fare_submissions
+            WHERE distance_km BETWEEN %s AND %s
+            AND route_type = %s
+            """,
+            (min_dist, max_dist, route_type),
+        )
+        # An aggregate always returns exactly one row, even over no data — the
+        # default is only here to satisfy fetchone()'s Optional return type.
+        avg_fare, count = cursor.fetchone() or (None, 0)
 
     return {
         "average_fare": round(avg_fare, 2) if avg_fare else None,
@@ -390,33 +394,43 @@ async def reverse_geocode(lat: float, lng: float):
 
     return {"name": name}
 
+# Deliberately `def`, not `async def`. Everything below it blocks: the Postgres
+# round trip and the Groq completion are both synchronous, and the completion can
+# take seconds. Declared async they would run *on* the event loop and stall every
+# other request in the process for that whole time — including /route and /search,
+# which have no reason to wait on a language model. As a plain `def`, FastAPI runs
+# it in a worker thread and the loop stays free.
+#
+# This was survivable when the query hit a local SQLite file; against a database
+# in another region it is not.
 @app.get("/ai-fare-recommendation")
-async def ai_fare_recommendation(
+def ai_fare_recommendation(
     distance_km: float,
     route_type: str,
     area: str = "Dhaka",
 ):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT AVG(fare_amount), COUNT(*), MIN(fare_amount), MAX(fare_amount)
-        FROM fare_submissions
-        WHERE distance_km BETWEEN ? AND ?
-        AND route_type = ?
-        """,
-        (distance_km - 0.5, distance_km + 0.5, route_type),
-    )
-    avg_fare, count, min_fare, max_fare = cursor.fetchone()
-    conn.close()
+    with db_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT AVG(fare_amount), COUNT(*), MIN(fare_amount), MAX(fare_amount)
+            FROM fare_submissions
+            WHERE distance_km BETWEEN %s AND %s
+            AND route_type = %s
+            """,
+            (distance_km - 0.5, distance_km + 0.5, route_type),
+        )
+        avg_fare, count, min_fare, max_fare = cursor.fetchone() or (None, 0, None, None)
 
-    fare_context = (
-        f"Crowdsourced data from {count} trips: "
-        f"average ৳{round(avg_fare, 0)}, "
-        f"range ৳{min_fare}–৳{max_fare}"
-        if count and count > 0
-        else "No crowdsourced fare data available yet."
-    )
+    # AVG is NULL exactly when the window matched no rows, so that — not the
+    # count — is the condition that decides whether there is anything to quote.
+    if avg_fare is None:
+        fare_context = "No crowdsourced fare data available yet."
+    else:
+        fare_context = (
+            f"Crowdsourced data from {count} trips: "
+            f"average ৳{round(avg_fare, 0)}, "
+            f"range ৳{min_fare}–৳{max_fare}"
+        )
 
     if distance_km > 10.0:
         roaming_instruction = """

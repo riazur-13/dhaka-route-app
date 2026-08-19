@@ -1,12 +1,27 @@
 """Shared fixtures.
 
 Every fixture here exists to keep the suite from touching anything real: no
-Groq completions are billed, and fares.db is never opened.
+Groq completions are billed, and the production database is never opened.
+
+The database tests run against a real Postgres, not a stand-in. They used to run
+against an in-memory SQLite, which stopped being worth anything the moment the
+app moved to Postgres: the placeholder style (%s vs ?), the schema types, and
+BIGSERIAL are exactly the things a migration gets wrong, and a SQLite double
+would have accepted all three regardless.
+
+Set TEST_DATABASE_URL to a throwaway database to run them. Locally that is:
+
+    docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=postgres --name fares-test postgres:17
+    TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres pytest
+
+Deliberately a *separate* variable from DATABASE_URL: importing main runs
+load_dotenv(), so DATABASE_URL is already populated with the live Neon
+credentials by the time the fixtures run, and the fixture truncates the table it
+is given.
 """
 
 import json
 import os
-import sqlite3
 import sys
 import types
 from pathlib import Path
@@ -21,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # one at module level. The value is never used — every test stubs the client.
 os.environ.setdefault("GROQ_API_KEY", "test-key-never-used")
 
+import database  # noqa: E402
 import main  # noqa: E402
 
 
@@ -77,43 +93,64 @@ def groq_unavailable(monkeypatch):
     monkeypatch.setattr(main, "groq_client", _stub_groq(create))
 
 
-@pytest.fixture
-def memory_db(monkeypatch):
-    """Redirect the app at an in-memory database."""
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.execute(
-        """
-        CREATE TABLE fare_submissions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            distance_km REAL NOT NULL,
-            fare_amount REAL NOT NULL,
-            route_type TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+class FareTable:
+    """Read-side helper so tests can assert on what actually landed."""
+
+    def query(self, sql: str, params: tuple = ()):
+        with database.db_cursor() as cursor:
+            cursor.execute(sql, params)
+            return cursor.fetchall()
+
+    def count(self) -> int:
+        return self.query("SELECT COUNT(*) FROM fare_submissions")[0][0]
+
+
+@pytest.fixture(scope="session")
+def test_database():
+    """Point the app at the throwaway test database for the whole session.
+
+    Session-scoped because tearing the pool down between tests meant paying for a
+    fresh TLS handshake to a remote Postgres on every single one.
+    """
+    test_url = os.getenv("TEST_DATABASE_URL")
+    if not test_url:
+        message = (
+            "TEST_DATABASE_URL is not set, so the database tests cannot run. "
+            "See the module docstring in tests/conftest.py for the one-line "
+            "docker command that provides one."
         )
-        """
-    )
+        # A missing test database must never quietly shrink CI to a green run
+        # over a handful of pure-arithmetic tests.
+        if os.getenv("CI"):
+            pytest.fail(message)
+        pytest.skip(message)
 
-    class KeepAlive:
-        """The endpoint closes its connection per request; the DB must survive."""
+    # importing main ran load_dotenv(), so DATABASE_URL currently holds the live
+    # credentials. The pool caches whatever it read when it was first built, so
+    # it has to be torn down before this override can take effect.
+    patch = pytest.MonkeyPatch()
+    patch.setenv("DATABASE_URL", test_url)
+    database.close_pool()
 
-        def cursor(self):
-            return conn.cursor()
+    database.init_db()
 
-        def commit(self):
-            conn.commit()
+    yield
 
-        def close(self):
-            pass
-
-    monkeypatch.setattr(main, "get_connection", lambda: KeepAlive())
-    monkeypatch.setattr(main, "init_db", lambda: None)
-
-    yield conn
-    conn.close()
+    database.close_pool()
+    patch.undo()
 
 
 @pytest.fixture
-def client(memory_db, groq_accepts):
+def fare_db(test_database):
+    """Empty the fare table, then hand back a reader for it."""
+    with database.db_cursor() as cursor:
+        cursor.execute("TRUNCATE fare_submissions RESTART IDENTITY")
+
+    return FareTable()
+
+
+@pytest.fixture
+def client(fare_db, groq_accepts):
     from fastapi.testclient import TestClient
 
     with TestClient(main.app) as test_client:

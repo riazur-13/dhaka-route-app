@@ -98,18 +98,33 @@ def test_ai_rejection_reaches_the_client(client, groq_rejects):
     assert "clearly spam" in response.json()["detail"]
 
 
-def test_accepted_fare_is_persisted(client, memory_db):
+def test_accepted_fare_is_persisted(client, fare_db):
     assert submit(client, "203.0.113.60").status_code == 200
 
-    rows = memory_db.execute("SELECT distance_km, fare_amount FROM fare_submissions").fetchall()
+    rows = fare_db.query("SELECT distance_km, fare_amount FROM fare_submissions")
     assert rows == [(3.0, 80.0)]
 
 
-def test_rejected_fare_is_not_persisted(client, memory_db, groq_rejects):
+def test_rejected_fare_is_not_persisted(client, fare_db, groq_rejects):
     submit(client, "203.0.113.61")
 
-    count = memory_db.execute("SELECT COUNT(*) FROM fare_submissions").fetchone()[0]
-    assert count == 0
+    assert fare_db.count() == 0
+
+
+def test_submissions_survive_a_restart(client, fare_db):
+    """The point of the whole migration: SQLite lost these on every deploy.
+
+    A new TestClient re-runs application startup, which is where init_db lives —
+    the row has to still be there on the other side of it.
+    """
+    assert submit(client, "203.0.113.62").status_code == 200
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(main.app):
+        pass
+
+    assert fare_db.count() == 1
 
 
 def test_recommendation_failure_does_not_leak_internals(client, groq_unavailable):

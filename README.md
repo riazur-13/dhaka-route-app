@@ -22,7 +22,7 @@ A map app for Dhaka, Bangladesh that routes a trip on foot and prices it as a ri
 
 **Frontend:** Next.js 16, React 19, TypeScript, Tailwind, Leaflet, OpenStreetMap, Vercel
 
-**Backend:** Python, FastAPI, SQLite, Render
+**Backend:** Python, FastAPI, Postgres (Neon), Render
 
 **APIs:** OSRM (routing), Nominatim (place search + reverse geocoding), Groq (fare validation + recommendations)
 
@@ -44,9 +44,40 @@ The two lines drawn on the map are the same geometry in two styles, not two sepa
 
 ---
 
+## Running the backend
+
+The backend needs a Postgres database and a Groq key, both read from
+`backend/.env`:
+
+```
+DATABASE_URL=postgresql://user:password@host/dbname?sslmode=require
+GROQ_API_KEY=...
+```
+
+The `fare_submissions` table and its index are created on start-up, so a blank
+database is enough to boot against.
+
+```bash
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --reload
+```
+
+To run the tests, point `TEST_DATABASE_URL` at a **throwaway** database — the
+fixtures empty the fare table between tests, so never give it the live one:
+
+```bash
+docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=postgres --name fares-test postgres:17
+pip install -r requirements-dev.txt
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres pytest
+```
+
+Without that variable the database tests skip locally, and fail in CI.
+
+---
+
 ## Known Limitations
 
-- SQLite resets on Render redeploy (free tier), so submitted fares do not survive a deploy
 - OSRM public server has rate limits
 - Rickshaw paths are approximated by the walking profile; OSRM has no rickshaw profile
 - Rickshaw stand locations are a hand-maintained list, not a live data source

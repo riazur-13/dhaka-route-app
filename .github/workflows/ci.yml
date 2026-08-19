@@ -15,6 +15,24 @@ jobs:
     name: Backend
     runs-on: ubuntu-latest
 
+    # The fare store is Postgres, so the tests that touch it need a real one.
+    # A throwaway container is what keeps them from being pointed at Neon: the
+    # fixtures truncate the fare table between tests.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        # Without this the test step can start before Postgres accepts
+        # connections, which fails the run for no reason anyone can act on.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -39,8 +57,13 @@ jobs:
       - name: Install test dependencies
         run: pip install -r backend/requirements-dev.txt
 
+      # GitHub sets CI=true, which conftest.py reads: if TEST_DATABASE_URL were
+      # ever missing here, the database tests fail the run rather than skipping
+      # themselves and leaving a green tick over untested code.
       - name: Run tests
         working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest -v
 
   frontend:
