@@ -4,20 +4,17 @@ from pydantic import BaseModel
 from collections import deque
 from contextlib import asynccontextmanager
 import httpx
-import os
 import json
 import logging
 import threading
 import time
-from dotenv import load_dotenv
 from groq import Groq
+from config import GROQ_API_KEY, GROQ_MODEL
 from database import close_pool, db_cursor, init_db
-
-load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+groq_client = Groq(api_key=GROQ_API_KEY)
 
 
 @asynccontextmanager
@@ -254,11 +251,19 @@ Do not write any introductory or trailing text outside of the JSON block."""
 
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=GROQ_MODEL,
             messages=[{"role": "user", "content": validation_prompt}],
-            max_tokens=100,
-            temperature=0.1, 
-            response_format={"type": "json_object"} 
+            # Was 100, which is not survivable on a reasoning model: the
+            # reasoning tokens are billed against this budget and land before
+            # any JSON does, so the response came back empty and Groq rejected
+            # it with json_validate_failed on every single submission. That 400
+            # is caught below and falls back to the range check, so the endpoint
+            # went on returning 200 with the AI silently skipped. Measured usage
+            # on this prompt is ~160-190 tokens; the headroom is deliberate,
+            # because the failure mode here is invisible rather than loud.
+            max_tokens=1024,
+            temperature=0.1,
+            response_format={"type": "json_object"}
         )
         
         content = response.choices[0].message.content
@@ -459,9 +464,13 @@ CRITICAL INSTRUCTION: Your entire response MUST be exactly 3 or 4 sentences long
 
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=1024, 
+            # Same reasoning-token budget problem as the validation call, plus
+            # Bengali runs to more tokens per sentence than English. Measured
+            # 390-550 tokens for the 3-4 sentences this prompt asks for, so 1024
+            # was close enough to the ceiling to truncate mid-sentence.
+            max_tokens=2048,
             temperature=0.3,
         )
         recommendation = response.choices[0].message.content

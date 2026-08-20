@@ -38,6 +38,7 @@ os.environ.setdefault("GROQ_API_KEY", "test-key-never-used")
 
 import database  # noqa: E402
 import main  # noqa: E402
+from config import get_env  # noqa: E402
 
 
 def _completion(content: str):
@@ -112,7 +113,7 @@ def test_database():
     Session-scoped because tearing the pool down between tests meant paying for a
     fresh TLS handshake to a remote Postgres on every single one.
     """
-    test_url = os.getenv("TEST_DATABASE_URL")
+    test_url = get_env("TEST_DATABASE_URL")
     if not test_url:
         message = (
             "TEST_DATABASE_URL is not set, so the database tests cannot run. "
@@ -121,7 +122,7 @@ def test_database():
         )
         # A missing test database must never quietly shrink CI to a green run
         # over a handful of pure-arithmetic tests.
-        if os.getenv("CI"):
+        if get_env("CI"):
             pytest.fail(message)
         pytest.skip(message)
 

@@ -15,11 +15,12 @@ main.py during the Render build to catch syntax errors, and that build step has 
 database credentials and no business talking to Neon.
 """
 
-import os
 import threading
 from contextlib import contextmanager
 
 from psycopg_pool import ConnectionPool
+
+from config import get_env
 
 # Neon's pooler drops idle connections, so a pooled connection can be dead by the
 # time we hand it out. `check` makes the pool test each one on checkout and
@@ -43,7 +44,10 @@ def get_pool() -> ConnectionPool:
     with _pool_lock:
         # Another thread may have built it while we waited for the lock.
         if _pool is None:
-            database_url = os.getenv("DATABASE_URL")
+            # Read here rather than at import so the pool stays lazy, and read
+            # through get_env so a newline picked up from the Render dashboard
+            # or a .env file cannot reach the connection string.
+            database_url = get_env("DATABASE_URL")
             if not database_url:
                 raise RuntimeError(
                     "DATABASE_URL is not set. Point it at your Postgres instance, "

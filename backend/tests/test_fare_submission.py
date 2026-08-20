@@ -1,5 +1,6 @@
 """The /fares submission path: throttling, rejection messages, error hygiene."""
 
+import config
 import main
 
 VALID_FARE = {"distance_km": 3.0, "fare_amount": 80.0, "route_type": "rickshaw"}
@@ -125,6 +126,24 @@ def test_submissions_survive_a_restart(client, fare_db):
         pass
 
     assert fare_db.count() == 1
+
+
+def test_both_groq_call_sites_use_the_configured_model(client, groq_accepts):
+    """A model id spelled out per call site is how the last outage went unnoticed.
+
+    Groq decommissioned llama-3.3-70b-versatile while it was named at two call
+    sites, and both of them swallow errors and fall back — so the endpoints kept
+    answering 200 with the AI quietly gone. Pinning both to the one config value
+    means a withdrawn model is a single edit, not a hunt.
+    """
+    assert submit(client, "203.0.113.70").status_code == 200
+    client.get(
+        "/ai-fare-recommendation",
+        params={"distance_km": 3, "route_type": "rickshaw", "area": "Gulshan"},
+    )
+
+    assert len(groq_accepts) == 2
+    assert {call["model"] for call in groq_accepts} == {config.GROQ_MODEL}
 
 
 def test_recommendation_failure_does_not_leak_internals(client, groq_unavailable):

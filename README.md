@@ -52,7 +52,14 @@ The backend needs a Postgres database and a Groq key, both read from
 ```
 DATABASE_URL=postgresql://user:password@host/dbname?sslmode=require
 GROQ_API_KEY=...
+GROQ_MODEL=openai/gpt-oss-20b   # optional; this is the default
 ```
+
+Every one of these is read through `config.get_env`, which strips surrounding
+whitespace — a trailing newline on a pasted `DATABASE_URL` has taken a deploy
+down before. `GROQ_MODEL` exists so that a model being decommissioned is a
+dashboard edit rather than a code change; both AI call sites read that one
+value.
 
 The `fare_submissions` table and its index are created on start-up, so a blank
 database is enough to boot against.
