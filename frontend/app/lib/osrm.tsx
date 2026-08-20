@@ -66,16 +66,33 @@ export async function getAverageFare(
   const res = await fetch(url);
   return res.json();
 }
-export async function searchPlace(query: string) {
+export interface PlaceResult {
+  name: string;
+  full_name: string;
+  lat: number;
+  lng: number;
+}
+
+export async function searchPlace(query: string): Promise<PlaceResult[]> {
   const url = `${API_BASE}/search?query=${encodeURIComponent(query)}`;
-  const res = await fetch(url);
-  const data = await res.json();
-  return data.results as {
-    name: string;
-    full_name: string;
-    lat: number;
-    lng: number;
-  }[];
+  let res: Response;
+
+  try {
+    res = await fetch(url);
+  } catch {
+    return [];
+  }
+
+  // Anything but a 200 has no `results` at all — the backend answers 502 with a
+  // `detail` when Nominatim is blocked or down. This used to return undefined,
+  // which the caller put straight into state and then read .length off.
+  if (!res.ok) return [];
+
+  const data = await res.json().catch(() => null);
+
+  // Array.isArray, not `?? []`: the guard has to hold against any shape, not
+  // just null and undefined. Everything downstream calls .length and .map.
+  return Array.isArray(data?.results) ? (data.results as PlaceResult[]) : [];
 }
 export async function reverseGeocode(lat: number, lng: number): Promise<string> {
   const url = `${API_BASE}/reverse-geocode?lat=${lat}&lng=${lng}`;
