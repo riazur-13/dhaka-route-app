@@ -17,6 +17,9 @@ database credentials and no business talking to Neon.
 
 import threading
 from contextlib import contextmanager
+from datetime import timedelta
+from decimal import ROUND_HALF_UP, Decimal
+from typing import NamedTuple
 
 from psycopg_pool import ConnectionPool
 
@@ -112,3 +115,107 @@ def init_db() -> None:
             ON fare_submissions (route_type, distance_km)
             """
         )
+        # NUMERIC rather than DOUBLE PRECISION because these two columns are a
+        # lookup key, not a measurement, and a key is only useful if `=` is
+        # exact. Binary floating point stores 23.8103 as the nearest value it
+        # can represent, which is close enough to draw a map with and not close
+        # enough to match a row by.
+        #
+        # A NULL name is a cached *failure* — see cache_place_failure. One
+        # nullable column instead of a separate is_negative flag, because two
+        # columns describing the same fact can disagree and one cannot.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS geocode_cache (
+                lat NUMERIC(8, 4) NOT NULL,
+                lng NUMERIC(8, 4) NOT NULL,
+                name TEXT,
+                expires_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY (lat, lng)
+            )
+            """
+        )
+
+
+# Roughly 11 metres at Dhaka's latitude — finer than anyone can aim a click, and
+# coarse enough that two taps on the same doorway share a row.
+COORDINATE_QUANTUM = Decimal("0.0001")
+
+# A road does not get renamed twice in a month, so a name is worth keeping for a
+# long time. A block or an outage is worth remembering only long enough to stop
+# an impatient user's repeated clicks from becoming repeated outbound requests —
+# short enough that service coming back is noticed within one coffee break.
+GEOCODE_SUCCESS_TTL = timedelta(days=30)
+GEOCODE_FAILURE_TTL = timedelta(minutes=5)
+
+
+class CachedPlace(NamedTuple):
+    """A cache hit.
+
+    The wrapper exists so that a hit is distinguishable from a miss: the lookup
+    returns None when it found nothing, and a CachedPlace when it found
+    something — where `name` being None is itself the finding, meaning the last
+    attempt at these coordinates failed upstream.
+    """
+
+    name: str | None
+
+
+def round_coordinate(value: float) -> Decimal:
+    """Snap a coordinate to the cache's grid.
+
+    Via str() because Decimal(23.8103) would faithfully preserve the float's
+    error and Decimal("23.8103") does not. ROUND_HALF_UP rather than Python's
+    default banker's rounding, purely so the behaviour at a midpoint is the one
+    a reader expects.
+    """
+    return Decimal(str(value)).quantize(COORDINATE_QUANTUM, rounding=ROUND_HALF_UP)
+
+
+def lookup_place_name(lat: float, lng: float) -> CachedPlace | None:
+    """Return the cached entry for these coordinates, or None if there is none.
+
+    Expiry is evaluated by Postgres against its own clock, the same clock the
+    writes below stamp expires_at with, so a skewed application server cannot
+    make an entry immortal or stillborn.
+    """
+    with db_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT name FROM geocode_cache
+            WHERE lat = %s AND lng = %s AND expires_at > NOW()
+            """,
+            (round_coordinate(lat), round_coordinate(lng)),
+        )
+        row = cursor.fetchone()
+
+    return None if row is None else CachedPlace(name=row[0])
+
+
+def _write_cache_entry(lat: float, lng: float, name: str | None, ttl: timedelta) -> None:
+    """Upsert one entry. The key is the grid square, so re-writes replace."""
+    with db_cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO geocode_cache (lat, lng, name, expires_at)
+            VALUES (%s, %s, %s, NOW() + %s)
+            ON CONFLICT (lat, lng) DO UPDATE
+            SET name = EXCLUDED.name, expires_at = EXCLUDED.expires_at
+            """,
+            (round_coordinate(lat), round_coordinate(lng), name, ttl),
+        )
+
+
+def cache_place_name(lat: float, lng: float, name: str) -> None:
+    """Remember a name Nominatim gave us."""
+    _write_cache_entry(lat, lng, name, GEOCODE_SUCCESS_TTL)
+
+
+def cache_place_failure(lat: float, lng: float) -> None:
+    """Remember that Nominatim could not answer for these coordinates.
+
+    This is the entry that matters while the datacenter IP is blocked: without
+    it, a user clicking the same blocked spot five times sends five requests to
+    a service that has already refused us five times.
+    """
+    _write_cache_entry(lat, lng, None, GEOCODE_FAILURE_TTL)

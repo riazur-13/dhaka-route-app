@@ -32,6 +32,13 @@ load_dotenv()
 # need a code change.
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
 
+# Nominatim's usage policy asks for a User-Agent that both names the application
+# and gives them a way to reach whoever runs it; a bare product token is the
+# shape their blocklists look for. The URL is the contact point. Overridable so
+# that a fork, or a second deployment, can identify itself as itself rather than
+# inheriting the blame — or the block — for this one.
+DEFAULT_USER_AGENT = "DhakaRouteFinder/1.0 (github.com/riazur-13/dhaka-route-app)"
+
 
 # The overloads are what let callers with a default treat the result as a plain
 # str: without them every use site inherits an Optional it can never actually
@@ -61,3 +68,4 @@ def get_env(name: str, default: str | None = None) -> str | None:
 
 GROQ_API_KEY = get_env("GROQ_API_KEY")
 GROQ_MODEL = get_env("GROQ_MODEL", DEFAULT_GROQ_MODEL)
+USER_AGENT = get_env("USER_AGENT", DEFAULT_USER_AGENT)

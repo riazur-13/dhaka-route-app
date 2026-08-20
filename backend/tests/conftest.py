@@ -26,6 +26,7 @@ import sys
 import types
 from pathlib import Path
 
+import httpx
 import pytest
 
 # main.py sits one level up and imports its siblings by bare name ("database"),
@@ -94,6 +95,49 @@ def groq_unavailable(monkeypatch):
     monkeypatch.setattr(main, "groq_client", _stub_groq(create))
 
 
+class Upstream:
+    """A scripted stand-in for Nominatim and OSRM.
+
+    Tests set what the outside world says, then assert on what we did with it.
+    A fresh httpx.Response is built per request because a Response's body is a
+    stream that can only be read once.
+    """
+
+    def __init__(self):
+        self.requests: list[httpx.Request] = []
+        self._build = lambda: httpx.Response(200, json={})
+
+    def replies(self, **response_kwargs):
+        """Answer every request with httpx.Response(**response_kwargs)."""
+        self._build = lambda: httpx.Response(**response_kwargs)
+
+    def raises(self, exc: Exception):
+        """Fail the way a timeout or a refused connection does — no response."""
+
+        def _raise():
+            raise exc
+
+        self._build = _raise
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return self._build()
+
+
+@pytest.fixture
+def upstream(monkeypatch):
+    """Route every outbound httpx.AsyncClient request into an Upstream."""
+    stub = Upstream()
+    real_async_client = httpx.AsyncClient
+
+    def async_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(stub.handle)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", async_client)
+    return stub
+
+
 class FareTable:
     """Read-side helper so tests can assert on what actually landed."""
 
@@ -150,8 +194,53 @@ def fare_db(test_database):
     return FareTable()
 
 
+class GeocodeCache:
+    """Read and write side helper for the reverse-geocode cache."""
+
+    def rows(self):
+        with database.db_cursor() as cursor:
+            cursor.execute("SELECT lat, lng, name FROM geocode_cache ORDER BY lat, lng")
+            return cursor.fetchall()
+
+    def count(self) -> int:
+        with database.db_cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM geocode_cache")
+            return cursor.fetchone()[0]
+
+    def seconds_until_expiry(self, lat: float, lng: float) -> float:
+        with database.db_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT EXTRACT(EPOCH FROM (expires_at - NOW())) FROM geocode_cache
+                WHERE lat = %s AND lng = %s
+                """,
+                (database.round_coordinate(lat), database.round_coordinate(lng)),
+            )
+            return float(cursor.fetchone()[0])
+
+    def expire(self, lat: float, lng: float) -> None:
+        """Age an entry out, so TTL behaviour is testable without waiting."""
+        with database.db_cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE geocode_cache SET expires_at = NOW() - INTERVAL '1 second'
+                WHERE lat = %s AND lng = %s
+                """,
+                (database.round_coordinate(lat), database.round_coordinate(lng)),
+            )
+
+
 @pytest.fixture
-def client(fare_db, groq_accepts):
+def geocode_cache(test_database):
+    """Empty the geocode cache, then hand back a reader for it."""
+    with database.db_cursor() as cursor:
+        cursor.execute("TRUNCATE geocode_cache")
+
+    return GeocodeCache()
+
+
+@pytest.fixture
+def client(fare_db, geocode_cache, groq_accepts):
     from fastapi.testclient import TestClient
 
     with TestClient(main.app) as test_client:

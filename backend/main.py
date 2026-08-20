@@ -1,6 +1,7 @@
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 from collections import deque
 from contextlib import asynccontextmanager
 import httpx
@@ -9,12 +10,82 @@ import logging
 import threading
 import time
 from groq import Groq
-from config import GROQ_API_KEY, GROQ_MODEL
-from database import close_pool, db_cursor, init_db
+from config import GROQ_API_KEY, GROQ_MODEL, USER_AGENT
+from database import (
+    cache_place_failure,
+    cache_place_name,
+    close_pool,
+    db_cursor,
+    init_db,
+    lookup_place_name,
+)
 
 logger = logging.getLogger(__name__)
 
 groq_client = Groq(api_key=GROQ_API_KEY)
+
+# Nominatim and OSRM are free public services with no SLA behind them. httpx
+# defaults to five seconds for every phase; the read budget is raised because a
+# slow answer still beats no answer, while connect is kept short because a host
+# that is refusing us fails at connect and there is nothing there to wait for.
+UPSTREAM_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+
+# The Groq SDK's own default is ten minutes. /fares is a sync `def`, so FastAPI
+# runs it in a worker thread from a finite pool — one wedged completion would
+# hold a thread for all ten of those minutes.
+GROQ_TIMEOUT_SECONDS = 30.0
+
+# Enough of a failing response to recognise what it is — a Nominatim block page,
+# an OSRM rate-limit notice, some proxy's HTML — without pouring an entire
+# document into the log on every failed request.
+UPSTREAM_BODY_LOG_CHARS = 200
+
+
+async def fetch_upstream_json(
+    url: str, *, service: str, params: dict | None = None
+) -> object:
+    """GET `url` and return its parsed JSON, or raise 502 with the reason logged.
+
+    Three separate things can go wrong here and all three used to reach the
+    browser as a 500. The request may never get an answer at all (timeout, DNS,
+    connection reset); the answer may carry an error status; or it may carry a
+    perfectly good 200 with a body that is not JSON — which is what a block page
+    is, and what took /reverse-geocode down. .json() was called on HTML and the
+    JSONDecodeError went straight past FastAPI to the client.
+
+    The response body is logged and never returned: an upstream error page can
+    name our egress IP or echo the query, and the caller only needs to know that
+    the service is down, not how.
+    """
+    unavailable = f"{service} is unavailable right now. Please try again in a moment."
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=UPSTREAM_TIMEOUT, headers={"User-Agent": USER_AGENT}
+        ) as client:
+            response = await client.get(url, params=params)
+    except httpx.RequestError as exc:
+        logger.warning("%s could not be reached: %r", service, exc)
+        raise HTTPException(status_code=502, detail=unavailable) from exc
+
+    if response.status_code != 200:
+        logger.warning(
+            "%s returned HTTP %s: %s",
+            service,
+            response.status_code,
+            response.text[:UPSTREAM_BODY_LOG_CHARS],
+        )
+        raise HTTPException(status_code=502, detail=unavailable)
+
+    try:
+        return response.json()
+    except ValueError as exc:
+        logger.warning(
+            "%s returned HTTP 200 with a body that is not JSON: %s",
+            service,
+            response.text[:UPSTREAM_BODY_LOG_CHARS],
+        )
+        raise HTTPException(status_code=502, detail=unavailable) from exc
 
 
 @asynccontextmanager
@@ -191,14 +262,19 @@ async def get_route(
         f"?overview=full&geometries=geojson"
     )
 
-    async with httpx.AsyncClient() as client:
-        response = await client.get(url)
-        data = response.json()
+    data = await fetch_upstream_json(url, service="OSRM routing")
 
-    if data["code"] != "Ok":
+    # .get rather than ["code"]: a JSON body that parsed fine but is not the
+    # shape OSRM documents is still an upstream problem, and a KeyError here
+    # would have been another 500.
+    if not isinstance(data, dict) or data.get("code") != "Ok":
         raise HTTPException(status_code=400, detail="Route not found")
 
-    route = data["routes"][0]
+    routes = data.get("routes") or []
+    if not routes:
+        raise HTTPException(status_code=400, detail="Route not found")
+
+    route = routes[0]
 
     return {
         "coordinates": route["geometry"]["coordinates"],
@@ -263,6 +339,7 @@ Do not write any introductory or trailing text outside of the JSON block."""
             # because the failure mode here is invisible rather than loud.
             max_tokens=1024,
             temperature=0.1,
+            timeout=GROQ_TIMEOUT_SECONDS,
             response_format={"type": "json_object"}
         )
         
@@ -345,13 +422,19 @@ async def search_place(query: str):
         "dedupe": 1,
     }
 
-    headers = {
-        "User-Agent": "DhakaRouteApp/1.0"
-    }
+    data = await fetch_upstream_json(
+        url, service="Nominatim place search", params=params
+    )
 
-    async with httpx.AsyncClient() as client:
-        response = await client.get(url, params=params, headers=headers)
-        data = response.json()
+    # A successful search is a JSON array. Nominatim reports its own errors as
+    # an object instead, and iterating one of those yields its keys as strings —
+    # which reached place["display_name"] and raised TypeError as a 500.
+    if not isinstance(data, list):
+        logger.warning("Nominatim place search returned %s, not a list", type(data).__name__)
+        raise HTTPException(
+            status_code=502,
+            detail="Place search is unavailable right now. Please try again in a moment.",
+        )
 
     results = [
         {
@@ -366,8 +449,28 @@ async def search_place(query: str):
     return {"results": results}
 
 
+REVERSE_GEOCODE_UNAVAILABLE = (
+    "Place names are unavailable right now. Please try again in a few minutes."
+)
+
+
 @app.get("/reverse-geocode")
 async def reverse_geocode(lat: float, lng: float):
+    coordinate_name = f"{lat:.4f}, {lng:.4f}"
+
+    # run_in_threadpool because psycopg is synchronous and this endpoint is not:
+    # called directly, each of these three round trips to Neon would block the
+    # event loop, and with it every other request in the process. Same reasoning
+    # as the note above /ai-fare-recommendation, arrived at from the other side.
+    cached = await run_in_threadpool(lookup_place_name, lat, lng)
+    if cached is not None:
+        # A cached None means the last attempt at this spot failed upstream.
+        # Answering from that is the whole point: a user clicking a blocked
+        # location five times should cost Nominatim nothing after the first.
+        if cached.name is None:
+            raise HTTPException(status_code=502, detail=REVERSE_GEOCODE_UNAVAILABLE)
+        return {"name": cached.name}
+
     url = "https://nominatim.openstreetmap.org/reverse"
 
     params = {
@@ -376,26 +479,36 @@ async def reverse_geocode(lat: float, lng: float):
         "format": "json",
     }
 
-    headers = {
-        "User-Agent": "DhakaRouteApp/1.0"
-    }
+    try:
+        data = await fetch_upstream_json(
+            url, service="Nominatim reverse geocoding", params=params
+        )
+    except HTTPException:
+        await run_in_threadpool(cache_place_failure, lat, lng)
+        raise
 
-    async with httpx.AsyncClient() as client:
-        response = await client.get(url, params=params, headers=headers)
-        data = response.json()
+    if not isinstance(data, dict):
+        logger.warning("Nominatim reverse geocoding returned %s, not an object", type(data).__name__)
+        await run_in_threadpool(cache_place_failure, lat, lng)
+        raise HTTPException(status_code=502, detail=REVERSE_GEOCODE_UNAVAILABLE)
 
     if "error" in data:
-        return {"name": f"{lat:.4f}, {lng:.4f}"}
+        # Not a failure — this is Nominatim answering. There is genuinely no
+        # address at this point (open water, a field), so the coordinates are
+        # the honest name, and that fact is as durable as any other name here.
+        name = coordinate_name
+    else:
+        address = data.get("address", {})
+        name = (
+            address.get("road") or
+            address.get("neighbourhood") or
+            address.get("suburb") or
+            address.get("town") or
+            address.get("city") or
+            data.get("display_name", coordinate_name)
+        )
 
-    address = data.get("address", {})
-    name = (
-        address.get("road") or
-        address.get("neighbourhood") or
-        address.get("suburb") or
-        address.get("town") or
-        address.get("city") or
-        data.get("display_name", f"{lat:.4f}, {lng:.4f}")
-    )
+    await run_in_threadpool(cache_place_name, lat, lng, name)
 
     return {"name": name}
 
@@ -472,6 +585,7 @@ CRITICAL INSTRUCTION: Your entire response MUST be exactly 3 or 4 sentences long
             # was close enough to the ceiling to truncate mid-sentence.
             max_tokens=2048,
             temperature=0.3,
+            timeout=GROQ_TIMEOUT_SECONDS,
         )
         recommendation = response.choices[0].message.content
         return {"recommendation": recommendation}

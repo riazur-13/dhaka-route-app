@@ -53,16 +53,33 @@ The backend needs a Postgres database and a Groq key, both read from
 DATABASE_URL=postgresql://user:password@host/dbname?sslmode=require
 GROQ_API_KEY=...
 GROQ_MODEL=openai/gpt-oss-20b   # optional; this is the default
+USER_AGENT=DhakaRouteFinder/1.0 (github.com/riazur-13/dhaka-route-app)   # optional
 ```
 
 Every one of these is read through `config.get_env`, which strips surrounding
 whitespace — a trailing newline on a pasted `DATABASE_URL` has taken a deploy
 down before. `GROQ_MODEL` exists so that a model being decommissioned is a
 dashboard edit rather than a code change; both AI call sites read that one
-value.
+value. `USER_AGENT` is sent on every request to Nominatim and OSRM, whose usage
+policies ask to be able to identify and contact whoever is calling them — set it
+to your own project if you fork this.
 
-The `fare_submissions` table and its index are created on start-up, so a blank
-database is enough to boot against.
+The `fare_submissions` and `geocode_cache` tables are created on start-up, so a
+blank database is enough to boot against.
+
+### Reverse geocoding is cached
+
+Nominatim blocks shared datacenter IP ranges, and the free Render tier gives the
+service one. Reverse-geocode results are therefore cached in Postgres, keyed on
+latitude and longitude rounded to four decimal places — about 11 m, finer than
+anyone can aim a click. Names are kept for 30 days. **Failures** are kept too,
+for five minutes, so that repeatedly clicking a location we have just been
+refused for does not send Nominatim a request each time.
+
+When the cache cannot help and the upstream service will not answer, the
+endpoints return **502** with a plain-string `detail`, and log the status code
+and the first 200 characters of the response body. They no longer call `.json()`
+on an unread response, which is how a Nominatim block page became a 500.
 
 ```bash
 cd backend
