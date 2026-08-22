@@ -115,6 +115,23 @@ def init_db() -> None:
             ON fare_submissions (route_type, distance_km)
             """
         )
+        # Added after the table already had rows in production, so it arrives as
+        # an ALTER rather than as a column in the CREATE above. Kept in one
+        # place rather than both: a column defined twice is a column whose two
+        # definitions drift.
+        #
+        # Nothing reads submitted_by yet. It is captured now because it cannot
+        # be recovered later — once a fare is in the table, whether a passenger
+        # or a driver typed it is gone, and the two have opposite incentives.
+        # The NOT NULL DEFAULT keeps every existing row valid, and 'unknown' is
+        # an honest label for rows submitted before anyone was asked.
+        cursor.execute(
+            """
+            ALTER TABLE fare_submissions
+            ADD COLUMN IF NOT EXISTS submitted_by TEXT NOT NULL DEFAULT 'unknown'
+            CHECK (submitted_by IN ('passenger', 'driver', 'unknown'))
+            """
+        )
         # NUMERIC rather than DOUBLE PRECISION because these two columns are a
         # lookup key, not a measurement, and a key is only useful if `=` is
         # exact. Binary floating point stores 23.8103 as the nearest value it

@@ -44,6 +44,51 @@ The two lines drawn on the map are the same geometry in two styles, not two sepa
 
 ---
 
+## How fares are calculated
+
+**Python decides the fare. The AI only phrases it in Bengali.**
+
+This used to work the other way round: the pricing rules lived as prose inside the
+Groq prompt and the model invented the number. That made the same trip price
+differently on two consecutive clicks, made the rules impossible to test, and meant
+no fare at all whenever Groq was slow or down.
+
+The rules now live in [`backend/fare_calculator.py`](backend/fare_calculator.py) as
+pure functions, with every constant in [`backend/config.py`](backend/config.py):
+
+1. **Base + per-km rate.** A flag fare charged at any distance, plus a per-kilometre
+   rate that differs for pedal and battery rickshaws.
+2. **A long-trip bend.** Beyond 8 km, only the *excess* distance is charged at the
+   higher multiplier — so the curve bends rather than stepping, and a 7.9 km ride
+   and an 8.1 km ride are priced within a couple of taka of each other.
+3. **Crowdsourced data, if there is enough of it.** Under 5 submissions it is
+   ignored; over 20 it dominates; in between the two are blended on a straight line,
+   so no single submission ever flips the answer overnight.
+4. **The floor, applied last.** See below.
+
+`/ai-fare-recommendation` returns `fare_low`, `fare_high`, `source`
+(`rules` / `blended` / `crowdsourced`), `sample_size` and `floor_applied` **whether
+or not Groq answers**. When it does not, `recommendation_available` is `false` and
+the Bengali text is a fallback string — the numbers are still there to render.
+
+### The floor is policy, not arithmetic
+
+The floor rates encode a **living wage for rickshaw pullers**, not a market price,
+and crowdsourced data is never allowed to push a recommendation below them. A pile
+of low submissions is evidence that haggling works, not evidence that a fare is
+fair, so the crowd can move a number up through the floor and never down through it.
+
+Because of that, the floor is clamped *after* every branch, and when it bites the
+whole range is rebuilt around it — a 0.1 km ride is quoted 30–41, never 30–26 or a
+zero-width 30–30 that would tell a passenger to refuse any counter-offer at all.
+
+All of these numbers are **provisional** and meant to be tuned. They are plain
+constants rather than environment variables on purpose: they are one coherent policy
+rather than twelve independent settings, and changing pricing should cost a commit
+and a review. `FARE_RATES_EFFECTIVE_DATE` records when they were last set.
+
+---
+
 ## Running the backend
 
 The backend needs a Postgres database and a Groq key, both read from
@@ -65,7 +110,11 @@ policies ask to be able to identify and contact whoever is calling them — set 
 to your own project if you fork this.
 
 The `fare_submissions` and `geocode_cache` tables are created on start-up, so a
-blank database is enough to boot against.
+blank database is enough to boot against. Schema changes to an existing table
+arrive as idempotent `ALTER TABLE ... IF NOT EXISTS` statements in the same
+`init_db()`, which is how `fare_submissions.submitted_by` is added. Nothing reads
+that column yet — it records whether a passenger or a driver entered a fare, and
+it is being captured now because it cannot be recovered later.
 
 ### Reverse geocoding is cached
 

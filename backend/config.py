@@ -69,3 +69,53 @@ def get_env(name: str, default: str | None = None) -> str | None:
 GROQ_API_KEY = get_env("GROQ_API_KEY")
 GROQ_MODEL = get_env("GROQ_MODEL", DEFAULT_GROQ_MODEL)
 USER_AGENT = get_env("USER_AGENT", DEFAULT_USER_AGENT)
+
+
+# --- Rickshaw pricing policy -------------------------------------------------
+#
+# PROVISIONAL. Every number below is a starting point for the project owner to
+# tune, not a measured market rate.
+#
+# These constants encode a living wage floor for rickshaw pullers, not just a
+# market price. That distinction is the whole point of the block. A market rate
+# is whatever a passenger can get a tired puller to accept at the end of a long
+# day; the floor is what this app will recommend regardless. The FLOOR_PER_KM
+# values and FARE_ABSOLUTE_MIN_BDT are therefore deliberate policy, and
+# fare_calculator applies them *after* crowdsourced data has had its say — a
+# pile of low submissions is evidence that haggling works, not evidence that a
+# fare is fair.
+#
+# Deliberately plain constants rather than get_env values, which is an exception
+# to the rule the rest of this file exists to enforce. They are one policy, not
+# twelve settings: the floor only means anything relative to the fair rate, and
+# the trust thresholds only mean anything relative to each other. Making them
+# individually editable from a dashboard would allow a floor above the fair rate
+# with nobody reviewing the combination. Changing pricing should cost a commit.
+
+FARE_BASE_BDT = 20  # per-trip flag, charged at any distance
+FARE_PER_KM_PEDAL = 25  # fair rate, pedal rickshaw
+FARE_PER_KM_BATTERY = 20  # fair rate, battery rickshaw
+
+# Never recommend below these, whatever the crowd says.
+FARE_FLOOR_PER_KM_PEDAL = 18
+FARE_FLOOR_PER_KM_BATTERY = 15
+FARE_ABSOLUTE_MIN_BDT = 30
+
+# Beyond the threshold, the *excess* distance is charged at the multiplier —
+# a rickshaw puller's effort per kilometre is not constant over a long trip.
+LONG_TRIP_THRESHOLD_KM = 8.0
+LONG_TRIP_MULTIPLIER = 1.3
+
+# Fares here are a negotiation, not a tariff, so a recommendation is a band
+# around a midpoint rather than a single number to be argued down from.
+FARE_RANGE_SPREAD = 0.15
+
+# How much crowdsourced data it takes to be believed. Below MIN_TRUST a handful
+# of submissions is noise; above FULL_TRUST it is better evidence of the local
+# going rate than any formula here. Between them the two are blended.
+CROWDSOURCE_MIN_TRUST = 5
+CROWDSOURCE_FULL_TRUST = 20
+
+# Stamped so a fare quoted in a screenshot can be dated. Fuel, rice and rent all
+# move; a rate card with no date on it is a rate card nobody dares change.
+FARE_RATES_EFFECTIVE_DATE = "2026-08"

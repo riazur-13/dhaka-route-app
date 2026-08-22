@@ -11,6 +11,7 @@ import threading
 import time
 from groq import Groq
 from config import GROQ_API_KEY, GROQ_MODEL, USER_AGENT
+from fare_calculator import calculate_fare
 from database import (
     cache_place_failure,
     cache_place_name,
@@ -526,54 +527,80 @@ def ai_fare_recommendation(
     distance_km: float,
     route_type: str,
     area: str = "Dhaka",
+    vehicle_type: str = "pedal",
 ):
+    if vehicle_type not in ("pedal", "battery"):
+        raise HTTPException(
+            status_code=400, detail="vehicle_type must be 'pedal' or 'battery'."
+        )
+
     with db_cursor() as cursor:
         cursor.execute(
             """
-            SELECT AVG(fare_amount), COUNT(*), MIN(fare_amount), MAX(fare_amount)
+            SELECT AVG(fare_amount), COUNT(*)
             FROM fare_submissions
             WHERE distance_km BETWEEN %s AND %s
             AND route_type = %s
             """,
             (distance_km - 0.5, distance_km + 0.5, route_type),
         )
-        avg_fare, count, min_fare, max_fare = cursor.fetchone() or (None, 0, None, None)
+        avg_fare, count = cursor.fetchone() or (None, 0)
 
-    # AVG is NULL exactly when the window matched no rows, so that — not the
-    # count — is the condition that decides whether there is anything to quote.
-    if avg_fare is None:
-        fare_context = "No crowdsourced fare data available yet."
-    else:
-        fare_context = (
-            f"Crowdsourced data from {count} trips: "
-            f"average ৳{round(avg_fare, 0)}, "
-            f"range ৳{min_fare}–৳{max_fare}"
+    # Named crowd_median because that is what it should be, and will be: an
+    # average is dragged around by one absurd submission in a way a median is
+    # not, and a fare table is exactly where absurd submissions land. Swapping
+    # the aggregate is a separate task, so for now the calculator is handed an
+    # average under the name of a median. This comment is the honest bit.
+    fare = calculate_fare(
+        distance_km=distance_km,
+        vehicle_type=vehicle_type,
+        crowd_median=float(avg_fare) if avg_fare is not None else None,
+        crowd_count=count or 0,
+    )
+
+    # The whole point of the rewrite: the number is already decided by the time
+    # the model is asked anything. Every pricing instruction that used to live
+    # in this prompt — the per-km rates, the over-10-km roaming premium — is now
+    # in config.py and fare_calculator.py, where it can be tested and reviewed.
+    # Groq's only remaining job is to say it in Bengali.
+    if fare["floor_applied"]:
+        tone = (
+            "This range sits at the fair minimum for the labour involved. "
+            "Word it so the passenger understands this is already a fair price "
+            "to the puller, and should not be bargained down further."
         )
-
-    if distance_km > 10.0:
-        roaming_instruction = """
-        IMPORTANT CRITICAL EXTRA DIRECTION:
-        This trip is exceptionally long (over 10 km). In Dhaka, a point-to-point rickshaw trip is rarely this long. 
-        Assume the user wants to roam around the city, take a scenic route, or book the rickshaw for a long time. 
-        - Do NOT calculate using basic low rates (e.g., 200 Tk is too low for 17 km).
-        - Recommend a significantly higher premium total (e.g., 500-800+ Tk) or explicitly advise bargaining for an hourly rate (e.g., 150-200 Tk per hour) because pulling a rickshaw for this distance requires immense physical effort.
-        """
     else:
-        roaming_instruction = "Give a standard fair price suggestion based on typical Dhaka rickshaw rates (roughly 20-25 Tk per km depending on the area)."
+        tone = "Include one practical bargaining tip."
 
     prompt = f"""You are a helpful Dhaka transport assistant.
-Give a short, friendly rickshaw fare recommendation in Bengali (বাংলা) language only.
+Write a short, friendly note in Bengali (বাংলা) language only.
 
-Trip details:
+The fare has already been calculated. Do not change it, do not recalculate it,
+and do not suggest any other number.
+
 - Distance: {distance_km} km
-- Transport: {route_type}
 - Area: {area}, Dhaka, Bangladesh
-- {fare_context}
+- Recommended fare: ৳{fare["low"]} to ৳{fare["high"]} BDT
 
-{roaming_instruction}
+{tone}
 
-Give a recommended fare range in BDT and one bargaining tip.
-CRITICAL INSTRUCTION: Your entire response MUST be exactly 3 or 4 sentences long. Do not write less than 3 sentences, and do not write more than 4 sentences. Make sure the final sentence is complete. Write only in Bengali."""
+CRITICAL INSTRUCTION: Your entire response MUST be exactly 3 or 4 sentences long.
+Do not write less than 3 sentences, and do not write more than 4 sentences. Make
+sure the final sentence is complete. State the fare range exactly as given above.
+Write only in Bengali."""
+
+    # Built before the Groq call so the numbers survive it. The fare is the
+    # answer; the Bengali is the wrapper, and a missing wrapper is not a missing
+    # answer. The frontend can render the range on its own.
+    payload = {
+        "fare_low": fare["low"],
+        "fare_high": fare["high"],
+        "source": fare["source"],
+        "sample_size": fare["sample_size"],
+        "floor_applied": fare["floor_applied"],
+    }
+
+    fallback = "এই মুহূর্তে পরামর্শ তৈরি করা যাচ্ছে না। একটু পরে আবার চেষ্টা করুন।"
 
     try:
         response = groq_client.chat.completions.create(
@@ -588,11 +615,27 @@ CRITICAL INSTRUCTION: Your entire response MUST be exactly 3 or 4 sentences long
             timeout=GROQ_TIMEOUT_SECONDS,
         )
         recommendation = response.choices[0].message.content
-        return {"recommendation": recommendation}
+
+        # A successful call can still carry no text. gpt-oss-20b is a reasoning
+        # model, and reasoning tokens are billed against max_tokens and emitted
+        # before any content, so hitting the ceiling returns HTTP 200 with
+        # content=None; a safety filter does the same. This used to fall
+        # straight through and serve {"recommendation": null} with a 200 and
+        # nothing in the log. An empty answer is a failed answer.
+        if not recommendation or not recommendation.strip():
+            logger.warning(
+                "Groq returned an empty recommendation (finish_reason=%s)",
+                getattr(response.choices[0], "finish_reason", "unknown"),
+            )
+            return {**payload, "recommendation": fallback, "recommendation_available": False}
+
+        return {
+            **payload,
+            "recommendation": recommendation.strip(),
+            "recommendation_available": True,
+        }
     except Exception:
         # Logged server-side rather than returned: the raw exception can name
         # internal config and credential state, and it reaches the user's screen.
         logger.exception("AI fare recommendation failed")
-        return {
-            "recommendation": "এই মুহূর্তে পরামর্শ তৈরি করা যাচ্ছে না। একটু পরে আবার চেষ্টা করুন।"
-        }
+        return {**payload, "recommendation": fallback, "recommendation_available": False}
