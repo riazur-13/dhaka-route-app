@@ -168,15 +168,37 @@ export default function Map() {
 
       const route = result.route;
       setRouteData(route);
+
+      // The route is already on the map by this point and stays there. A fare
+      // we could not look up, or advice we could not fetch, is a missing
+      // extra — not a reason to throw away a route that worked.
+      //
+      // The functional form keeps the *first* failure: `errorMessage` closed
+      // over here is the previous render's value, and a reverse-geocode
+      // failure earlier in the same click may already have set one.
+      const reportFirstFailure = (message: string) =>
+        setErrorMessage((previous) => previous ?? message);
+
       const avg = await getAverageFare(toKm(route.distance), "rickshaw");
-      setAvgFare(avg.average_fare);
-      setSubmissionCount(avg.submission_count);
+      if (avg.ok) {
+        // averageFare null here means nobody has submitted for this distance,
+        // which is a real answer and renders as such.
+        setAvgFare(avg.averageFare);
+        setSubmissionCount(avg.submissionCount);
+      } else {
+        reportFirstFailure(avg.message ?? "Could not load the crowdsourced fare for this trip.");
+      }
+
       const ai = await getAIRecommendation(
         toKm(route.distance),
         "rickshaw",
         destinationName || "Dhaka",
       );
-      setAiRecommendation(ai);
+      if (ai.ok) {
+        setAiRecommendation(ai.recommendation);
+      } else {
+        reportFirstFailure(ai.message ?? "Could not load the fare advice for this trip.");
+      }
     } finally {
       setLoading(false);
     }
@@ -253,9 +275,14 @@ export default function Map() {
 
     // On rejection the input is left intact so the user can correct the amount.
     if (result.ok) {
+      // Only a successful refresh replaces what is on screen. If the re-read
+      // fails, the previous average stays — the submission itself succeeded,
+      // and blanking the figure would make it look as though it had not.
       const avg = await getAverageFare(toKm(routeData.distance), "rickshaw");
-      setAvgFare(avg.average_fare);
-      setSubmissionCount(avg.submission_count);
+      if (avg.ok) {
+        setAvgFare(avg.averageFare);
+        setSubmissionCount(avg.submissionCount);
+      }
       setFareInput("");
     }
 

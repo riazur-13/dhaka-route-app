@@ -93,13 +93,46 @@ export async function submitFare(
   return { ok: true, message: data?.message || 'Thanks! Your fare was saved.' };
 }
 
+export interface AverageFareResult {
+  ok: boolean;
+  averageFare: number | null;
+  submissionCount: number;
+  message?: string;
+}
+
 export async function getAverageFare(
   distanceKm: number,
   routeType: 'walking' | 'rickshaw'
-) {
+): Promise<AverageFareResult> {
   const url = `${API_BASE}/fares/average?distance_km=${distanceKm}&route_type=${routeType}`; // ✅ uses API_BASE
-  const res = await fetch(url);
-  return res.json();
+  let res: Response;
+
+  // `ok` is the only thing that separates a failure from a real answer here.
+  // The backend sends average_fare: null with submission_count: 0 when nobody
+  // has submitted a fare for this distance yet, and that is data — it is how
+  // the app knows to say "no submissions" rather than "we could not ask".
+  // Reading a null average as an error would report an outage every time a
+  // route is new, which is most of them.
+  const empty = { averageFare: null, submissionCount: 0 };
+
+  try {
+    res = await fetch(url);
+  } catch {
+    return { ok: false, ...empty, message: UNREACHABLE };
+  }
+
+  const data = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    const detail = typeof data?.detail === 'string' ? data.detail : null;
+    return { ok: false, ...empty, message: detail || 'Could not load the crowdsourced fare for this trip.' };
+  }
+
+  return {
+    ok: true,
+    averageFare: typeof data?.average_fare === 'number' ? data.average_fare : null,
+    submissionCount: typeof data?.submission_count === 'number' ? data.submission_count : 0,
+  };
 }
 export interface PlaceResult {
   name: string;
@@ -168,13 +201,41 @@ export async function reverseGeocode(
   // shape of the string is not evidence of anything; only the status is.
   return { name: data?.name || coordinateFallback, ok: true };
 }
+export interface RecommendationResult {
+  ok: boolean;
+  recommendation: string | null;
+  message?: string;
+}
+
 export async function getAIRecommendation(
   distanceKm: number,
   routeType: string,
   area: string
-): Promise<string> {
+): Promise<RecommendationResult> {
   const url = `${API_BASE}/ai-fare-recommendation?distance_km=${distanceKm}&route_type=${routeType}&area=${encodeURIComponent(area)}`;
-  const res = await fetch(url);
-  const data = await res.json();
-  return data.recommendation;
+  let res: Response;
+
+  try {
+    res = await fetch(url);
+  } catch {
+    return { ok: false, recommendation: null, message: UNREACHABLE };
+  }
+
+  const data = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    const detail = typeof data?.detail === 'string' ? data.detail : null;
+    return {
+      ok: false,
+      recommendation: null,
+      message: detail || 'Could not load the fare advice for this trip.',
+    };
+  }
+
+  // A 200 with no usable string is still nothing to render. The backend does
+  // send a Bengali fallback sentence of its own when Groq fails, so this only
+  // catches a body that is missing the field or has the wrong type in it.
+  const recommendation = typeof data?.recommendation === 'string' ? data.recommendation : null;
+
+  return { ok: true, recommendation };
 }
