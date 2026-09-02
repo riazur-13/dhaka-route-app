@@ -1,0 +1,22 @@
+# Repo-wide ignores. Anything specific to one sub-project stays in that
+# sub-project's own .gitignore — this file is only for things that land
+# outside them, or in more than one of them.
+
+# Next.js build output, wherever it lands.
+#
+# frontend/.gitignore already covers frontend/.next, and that is the copy you
+# would expect. This rule is unanchored because `next dev` writes a second one
+# outside the frontend directory entirely: Turbopack builds its Pages Router
+# fallback bundle into <repo root>/<package.json "name">/.next/dev/static,
+# which for this project means dhaka-route/. Nothing in next.config.ts asks for
+# that and the documented turbopack.root detection does not explain it; it
+# appears to be a Next 16 quirk in how the fallback project resolves its output
+# directory.
+.next/
+
+# The directory that quirk creates. Anchored with a leading slash so it only
+# matches at the repo root, and named separately from the rule above because it
+# is a whole directory of nothing else — 7.7 MB of regenerated chunks, rebuilt
+# on the next `npm run dev` and safe to delete at any time. Ignored rather than
+# tolerated because `git add -A` would otherwise commit all of it.
+/dhaka-route/

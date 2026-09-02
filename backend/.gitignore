@@ -10,6 +10,3 @@ __pycache__/
 
 # Virtual environment
 venv/
-
-# Next.js build artifacts
-frontend/.next/
