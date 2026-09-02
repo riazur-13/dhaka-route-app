@@ -106,19 +106,28 @@ export default function Map() {
 
   const [aiRecommendation, setAiRecommendation] = useState<string | null>(null);
 
+  // Errors from event handlers and async work never reach a React error
+  // boundary — they run after render — so they have to be caught and put into
+  // state by hand. Kept separate from fareStatus, which belongs to the
+  // submission form and has its own lifecycle.
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
   function handleCurrentLocation() {
     if (!navigator.geolocation) {
       alert("Geolocation is not supported by your browser");
       return;
     }
 
+    setErrorMessage(null);
+
     navigator.geolocation.getCurrentPosition(
       async (position) => {
         const lat = position.coords.latitude;
         const lng = position.coords.longitude;
-        const name = await reverseGeocode(lat, lng);
+        const result = await reverseGeocode(lat, lng);
+        setErrorMessage(result.message ?? null);
         setStart([lat, lng]);
-        setStartName(name);
+        setStartName(result.name);
         setRouteData(null);
         setAvgFare(null);
         setAiRecommendation(null);
@@ -146,25 +155,42 @@ export default function Map() {
   ) {
     setLoading(true);
     setFareStatus(null);
-    const data = await fetchRoute(startPoint, endPoint);
-    if (data) {
-      setRouteData(data);
-      const avg = await getAverageFare(toKm(data.distance), "rickshaw");
+
+    // try/finally so a throw anywhere below cannot leave "Finding route..."
+    // stuck on screen forever. The pill is the only sign the app is busy.
+    try {
+      const result = await fetchRoute(startPoint, endPoint);
+
+      if (!result.ok || !result.route) {
+        setErrorMessage(result.message ?? "Could not find a route between those two points.");
+        return;
+      }
+
+      const route = result.route;
+      setRouteData(route);
+      const avg = await getAverageFare(toKm(route.distance), "rickshaw");
       setAvgFare(avg.average_fare);
       setSubmissionCount(avg.submission_count);
       const ai = await getAIRecommendation(
-        toKm(data.distance),
+        toKm(route.distance),
         "rickshaw",
         destinationName || "Dhaka",
       );
       setAiRecommendation(ai);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }
 
   async function handleMapClick(lat: number, lng: number) {
-    const name = await reverseGeocode(lat, lng);
+    setErrorMessage(null);
 
+    const result = await reverseGeocode(lat, lng);
+    setErrorMessage(result.message ?? null);
+    const name = result.name;
+
+    // The marker goes down regardless of ok — the click landed somewhere real,
+    // and only the label for it is in doubt.
     if (!start) {
       setStart([lat, lng]);
       setStartName(name);
@@ -193,6 +219,8 @@ export default function Map() {
     name: string,
   ) {
     const point: [number, number] = [lat, lng];
+
+    setErrorMessage(null);
 
     if (type === "start") {
       setStart(point);
@@ -519,6 +547,49 @@ export default function Map() {
               </div>
             </>
           )}
+        </div>
+      )}
+
+      {/* ── Error banner ── */}
+      {errorMessage && (
+        <div
+          role="alert"
+          style={{
+            position: "absolute",
+            top: "16px",
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 1000,
+            background: "rgba(127,29,29,0.95)",
+            border: "1px solid #ef4444",
+            color: "white",
+            padding: "8px 16px",
+            borderRadius: "8px",
+            fontSize: "13px",
+            display: "flex",
+            alignItems: "center",
+            gap: "12px",
+            maxWidth: "90vw",
+          }}
+        >
+          <span>{errorMessage}</span>
+          <button
+            type="button"
+            onClick={() => setErrorMessage(null)}
+            aria-label="Dismiss"
+            style={{
+              background: "transparent",
+              border: "none",
+              color: "white",
+              cursor: "pointer",
+              fontSize: "16px",
+              lineHeight: 1,
+              padding: 0,
+              flexShrink: 0,
+            }}
+          >
+            ×
+          </button>
         </div>
       )}
 

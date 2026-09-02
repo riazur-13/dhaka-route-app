@@ -1,22 +1,57 @@
 const API_BASE = 'https://dhaka-route-app-4.onrender.com'; // ✅ no space
 
+export interface RouteSuccess {
+  coordinates: [number, number][];
+  distance: number;
+  duration: number;
+}
+
+export interface RouteResult {
+  ok: boolean;
+  route: RouteSuccess | null;
+  message?: string;
+}
+
+const UNREACHABLE = 'Could not reach the server. Check your connection and try again.';
+
 export async function fetchRoute(
   start: [number, number],
   end: [number, number]
-) {
+): Promise<RouteResult> {
   const url = `${API_BASE}/route?start_lat=${start[0]}&start_lng=${start[1]}&end_lat=${end[0]}&end_lng=${end[1]}`;
+  let res: Response;
 
-  const res = await fetch(url);
-  const data = await res.json();
+  try {
+    res = await fetch(url);
+  } catch {
+    return { ok: false, route: null, message: UNREACHABLE };
+  }
 
-  if (!data.coordinates) return null;
+  const data = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    // The backend sends a plain-string `detail`: "Route not found" for a 400,
+    // or the OSRM-unavailable message for a 502. FastAPI's own 422 sends an
+    // array instead, which is not something to put in front of a user.
+    const detail = typeof data?.detail === 'string' ? data.detail : null;
+    return { ok: false, route: null, message: detail || 'Could not find a route between those two points.' };
+  }
+
+  // A 200 that is not the documented shape is still a failure, and used to
+  // return null here — indistinguishable from an error, and silent either way.
+  if (!Array.isArray(data?.coordinates)) {
+    return { ok: false, route: null, message: 'Could not find a route between those two points.' };
+  }
 
   const coordinates = data.coordinates.map(([lng, lat]: [number, number]) => [lat, lng] as [number, number]);
 
   return {
-    coordinates,
-    distance: data.distance,
-    duration: data.duration,
+    ok: true,
+    route: {
+      coordinates,
+      distance: data.distance,
+      duration: data.duration,
+    },
   };
 }
 
@@ -94,11 +129,44 @@ export async function searchPlace(query: string): Promise<PlaceResult[]> {
   // just null and undefined. Everything downstream calls .length and .map.
   return Array.isArray(data?.results) ? (data.results as PlaceResult[]) : [];
 }
-export async function reverseGeocode(lat: number, lng: number): Promise<string> {
+export type GeocodeResult = { name: string; ok: boolean; message?: string };
+
+export async function reverseGeocode(
+  lat: number,
+  lng: number
+): Promise<GeocodeResult> {
   const url = `${API_BASE}/reverse-geocode?lat=${lat}&lng=${lng}`;
-  const res = await fetch(url);
-  const data = await res.json();
-  return data.name || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+
+  // Always a usable name, whatever happens below. The caller drops a marker on
+  // the map either way, and a marker labelled with its own coordinates is a
+  // worse label than a street name but not a broken one.
+  const coordinateFallback = `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+  let res: Response;
+
+  try {
+    res = await fetch(url);
+  } catch {
+    return { name: coordinateFallback, ok: false, message: UNREACHABLE };
+  }
+
+  const data = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    // 502 when Nominatim is blocked or down, including a cached failure the
+    // backend is replaying rather than asking again.
+    const detail = typeof data?.detail === 'string' ? data.detail : null;
+    return {
+      name: coordinateFallback,
+      ok: false,
+      message: detail || 'Place names are unavailable right now.',
+    };
+  }
+
+  // ok: true even when `name` reads back as a pair of coordinates. The backend
+  // returns exactly that, deliberately, for a spot with no address — open
+  // water, an empty field — and that is Nominatim answering, not failing. The
+  // shape of the string is not evidence of anything; only the status is.
+  return { name: data?.name || coordinateFallback, ok: true };
 }
 export async function getAIRecommendation(
   distanceKm: number,
