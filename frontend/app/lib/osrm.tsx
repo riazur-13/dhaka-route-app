@@ -14,20 +14,47 @@ export interface RouteResult {
 
 const UNREACHABLE = 'Could not reach the server. Check your connection and try again.';
 
+/**
+ * True when a thrown error is the caller cancelling, not something failing.
+ *
+ * Gated on the signal existing at all, so a call made without one can never
+ * report a cancellation. That is what lets the overloads below promise a
+ * non-null result to callers that do not pass a signal — a call with no signal
+ * has nothing that could cancel it.
+ *
+ * Both checks, because not every runtime throws the same object: some give a
+ * DOMException named AbortError, and reading signal.aborted covers the rest.
+ */
+function wasAborted(signal: AbortSignal | undefined, error: unknown): boolean {
+  if (!signal) return false;
+  return signal.aborted || (error as Error)?.name === 'AbortError';
+}
+
+/**
+ * Returns null when cancelled. Null is not a failure and must not be reported
+ * as one: a newer request has replaced this one and owns the screen now.
+ */
 export async function fetchRoute(
   start: [number, number],
-  end: [number, number]
-): Promise<RouteResult> {
+  end: [number, number],
+  signal?: AbortSignal
+): Promise<RouteResult | null> {
   const url = `${API_BASE}/route?start_lat=${start[0]}&start_lng=${start[1]}&end_lat=${end[0]}&end_lng=${end[1]}`;
   let res: Response;
 
   try {
-    res = await fetch(url);
-  } catch {
+    res = await fetch(url, { signal });
+  } catch (error) {
+    if (wasAborted(signal, error)) return null;
     return { ok: false, route: null, message: UNREACHABLE };
   }
 
   const data = await res.json().catch(() => null);
+
+  // The body can be cut off after the headers arrived. The parse guard above
+  // swallows that as a null body, and without this we would fall through and
+  // answer with a "no route found" failure for a request nobody is waiting on.
+  if (signal?.aborted) return null;
 
   if (!res.ok) {
     // The backend sends a plain-string `detail`: "Route not found" for a 400,
@@ -100,10 +127,25 @@ export interface AverageFareResult {
   message?: string;
 }
 
-export async function getAverageFare(
+// Overloaded rather than plainly returning `| null`, so that the fare
+// submission flow — which has nothing to cancel it and passes no signal — is
+// not forced to handle a null it can never receive. wasAborted() only reports a
+// cancellation when a signal was supplied, which is what makes this sound
+// rather than merely convenient.
+export function getAverageFare(
   distanceKm: number,
   routeType: 'walking' | 'rickshaw'
-): Promise<AverageFareResult> {
+): Promise<AverageFareResult>;
+export function getAverageFare(
+  distanceKm: number,
+  routeType: 'walking' | 'rickshaw',
+  signal: AbortSignal
+): Promise<AverageFareResult | null>;
+export async function getAverageFare(
+  distanceKm: number,
+  routeType: 'walking' | 'rickshaw',
+  signal?: AbortSignal
+): Promise<AverageFareResult | null> {
   const url = `${API_BASE}/fares/average?distance_km=${distanceKm}&route_type=${routeType}`; // ✅ uses API_BASE
   let res: Response;
 
@@ -116,12 +158,17 @@ export async function getAverageFare(
   const empty = { averageFare: null, submissionCount: 0 };
 
   try {
-    res = await fetch(url);
-  } catch {
+    res = await fetch(url, { signal });
+  } catch (error) {
+    if (wasAborted(signal, error)) return null;
     return { ok: false, ...empty, message: UNREACHABLE };
   }
 
   const data = await res.json().catch(() => null);
+
+  // Same window as the other two: a truncated body reads as a null one, and
+  // would otherwise be reported as a fare we could not load.
+  if (signal?.aborted) return null;
 
   if (!res.ok) {
     const detail = typeof data?.detail === 'string' ? data.detail : null;
@@ -239,21 +286,28 @@ export interface RecommendationResult {
   message?: string;
 }
 
+/** Returns null when cancelled — see fetchRoute. */
 export async function getAIRecommendation(
   distanceKm: number,
   routeType: string,
-  area: string
-): Promise<RecommendationResult> {
+  area: string,
+  signal?: AbortSignal
+): Promise<RecommendationResult | null> {
   const url = `${API_BASE}/ai-fare-recommendation?distance_km=${distanceKm}&route_type=${routeType}&area=${encodeURIComponent(area)}`;
   let res: Response;
 
   try {
-    res = await fetch(url);
-  } catch {
+    res = await fetch(url, { signal });
+  } catch (error) {
+    if (wasAborted(signal, error)) return null;
     return { ok: false, recommendation: null, message: UNREACHABLE };
   }
 
   const data = await res.json().catch(() => null);
+
+  // This is the longest of the three — a Groq completion — so it is the one
+  // most likely to still be open when the user moves on.
+  if (signal?.aborted) return null;
 
   if (!res.ok) {
     const detail = typeof data?.detail === 'string' ? data.detail : null;

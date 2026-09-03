@@ -133,6 +133,11 @@ export default function Map() {
     end: null,
   });
 
+  // One controller for the whole route chain. Unlike the geocode controllers
+  // above there is only ever one of these, because the three requests it covers
+  // are three parts of a single answer rather than two independent boxes.
+  const routeAbort = useRef<AbortController | null>(null);
+
   // Wake the backend before the user clicks anything. Render's free tier stops
   // the container when idle, and the first request pays the whole cold start —
   // which, before this, was a map click that showed nothing at all until it
@@ -228,13 +233,31 @@ export default function Map() {
     endPoint: [number, number],
     destinationName: string,
   ) {
+    // One controller for the whole chain, not one per call. fetchRoute produces
+    // the distance the other two consume, so they are three parts of a single
+    // answer — abandoning it half way and keeping the rest would leave a fare
+    // and some advice describing a route that is no longer on screen.
+    routeAbort.current?.abort();
+    const controller = new AbortController();
+    routeAbort.current = controller;
+    const isCurrent = () => routeAbort.current === controller;
+
     setLoading(true);
     setFareStatus(null);
 
     // try/finally so a throw anywhere below cannot leave "Finding route..."
     // stuck on screen forever. The pill is the only sign the app is busy.
     try {
-      const result = await fetchRoute(startPoint, endPoint);
+      const result = await fetchRoute(startPoint, endPoint, controller.signal);
+
+      // Cancelled. Touch nothing at all — not routeData, not the fare, not the
+      // banner. A newer getRoute owns every one of those now, and this call
+      // being replaced is the user's own doing, not a failure to report.
+      //
+      // isCurrent() as well as the null check because a response that finished
+      // just before the abort still resolves normally, and writing its route to
+      // the screen would undo the newer call that superseded it.
+      if (result === null || !isCurrent()) return;
 
       if (!result.ok || !result.route) {
         setErrorMessage(result.message ?? "Could not find a route between those two points.");
@@ -254,7 +277,9 @@ export default function Map() {
       const reportFirstFailure = (message: string) =>
         setErrorMessage((previous) => previous ?? message);
 
-      const avg = await getAverageFare(toKm(route.distance), "rickshaw");
+      const avg = await getAverageFare(toKm(route.distance), "rickshaw", controller.signal);
+      if (avg === null || !isCurrent()) return;
+
       if (avg.ok) {
         // averageFare null here means nobody has submitted for this distance,
         // which is a real answer and renders as such.
@@ -268,14 +293,23 @@ export default function Map() {
         toKm(route.distance),
         "rickshaw",
         destinationName || "Dhaka",
+        controller.signal,
       );
+      if (ai === null || !isCurrent()) return;
+
       if (ai.ok) {
         setAiRecommendation(ai.recommendation);
       } else {
         reportFirstFailure(ai.message ?? "Could not load the fare advice for this trip.");
       }
     } finally {
-      setLoading(false);
+      // Only the call that still owns the screen may clear the pill. A
+      // superseded one running its finally would switch "Finding route..." off
+      // while the newer request it was replaced by is still finding the route.
+      if (isCurrent()) {
+        setLoading(false);
+        routeAbort.current = null;
+      }
     }
   }
 
@@ -305,6 +339,20 @@ export default function Map() {
     // The third click starts over: the old route and its fare no longer
     // describe anything on screen.
     if (start && end) {
+      // Including any route chain still running for the trip being discarded.
+      // Nothing else can stop it: this branch clears the route rather than
+      // asking for a new one, so no later getRoute will come along and abort
+      // it. Without this, a chain begun by the click that set the end point
+      // finishes a few seconds later and draws its route, fare and advice back
+      // over the fresh start marker the user has just placed.
+      //
+      // The geocode controllers cannot cover this. They are keyed per box and
+      // this is a "start" click, so it aborts the start lookup while the end
+      // lookup that leads to the route runs on untouched.
+      routeAbort.current?.abort();
+      routeAbort.current = null;
+      setLoading(false);
+
       setEnd(null);
       setEndName("");
       setEndNamePending(false);
