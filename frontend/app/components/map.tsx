@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   MapContainer,
   TileLayer,
@@ -17,6 +17,7 @@ import {
   getAverageFare,
   reverseGeocode,
   getAIRecommendation,
+  pingHealth,
   type FareSubmitResult,
 } from "../lib/osrm";
 import SearchBox from "./SearchBox";
@@ -89,6 +90,9 @@ interface RouteData {
   duration: number;
 }
 
+/** Which of the two search boxes a place name belongs to. */
+type NameField = "start" | "end";
+
 export default function Map() {
   const [start, setStart] = useState<[number, number] | null>(null);
   const [end, setEnd] = useState<[number, number] | null>(null);
@@ -112,6 +116,66 @@ export default function Map() {
   // submission form and has its own lifecycle.
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // True while a place name is being looked up for that box. Drives the
+  // skeleton in SearchBox and nothing else.
+  const [startNamePending, setStartNamePending] = useState(false);
+  const [endNamePending, setEndNamePending] = useState(false);
+
+  // One in-flight reverse geocode per box. Deliberately per-field rather than a
+  // single shared controller: the common rapid pair of clicks is start-then-end,
+  // and a shared controller would cancel the start lookup because the user
+  // picked a destination — throwing away a good name for no benefit and
+  // stranding that box's skeleton with nothing left to resolve it. Keyed this
+  // way, a lookup is only ever cancelled by a newer lookup for the same box,
+  // which is the case the staleness actually arises in.
+  const geocodeAbort = useRef<Record<NameField, AbortController | null>>({
+    start: null,
+    end: null,
+  });
+
+  // Wake the backend before the user clicks anything. Render's free tier stops
+  // the container when idle, and the first request pays the whole cold start —
+  // which, before this, was a map click that showed nothing at all until it
+  // finished. Fire and forget: no await on render, no state, and nothing shown
+  // if it fails, because the user has not asked for anything yet.
+  useEffect(() => {
+    void pingHealth();
+  }, []);
+
+  /**
+   * Look up a place name, cancelling any previous lookup for the same box.
+   *
+   * Returns null when this lookup was the one cancelled, in which case a newer
+   * lookup already owns the name and the pending flag and the caller must not
+   * touch either.
+   */
+  async function resolvePlaceName(field: NameField, lat: number, lng: number) {
+    geocodeAbort.current[field]?.abort();
+
+    const controller = new AbortController();
+    geocodeAbort.current[field] = controller;
+
+    const result = await reverseGeocode(lat, lng, controller.signal);
+
+    // Only clear the slot if it is still ours; a newer lookup may have claimed
+    // it while this one was in flight.
+    if (geocodeAbort.current[field] === controller) {
+      geocodeAbort.current[field] = null;
+    }
+
+    return result;
+  }
+
+  function applyPlaceName(field: NameField, name: string) {
+    if (field === "start") {
+      setStartName(name);
+      setStartNamePending(false);
+    } else {
+      setEndName(name);
+      setEndNamePending(false);
+    }
+  }
+
   function handleCurrentLocation() {
     if (!navigator.geolocation) {
       alert("Geolocation is not supported by your browser");
@@ -124,13 +188,24 @@ export default function Map() {
       async (position) => {
         const lat = position.coords.latitude;
         const lng = position.coords.longitude;
-        const result = await reverseGeocode(lat, lng);
-        setErrorMessage(result.message ?? null);
+
+        // Marker and skeleton first, before the await, same as a map click.
         setStart([lat, lng]);
-        setStartName(result.name);
+        setStartName("");
+        setStartNamePending(true);
         setRouteData(null);
         setAvgFare(null);
         setAiRecommendation(null);
+
+        const result = await resolvePlaceName("start", lat, lng);
+
+        // Cancelled — a newer lookup owns this box now. Nothing to do, and in
+        // particular nothing to say: the user did this, it is not a failure.
+        if (result === null) return;
+
+        setErrorMessage(result.message ?? null);
+        applyPlaceName("start", result.name);
+
         if (end) await getRoute([lat, lng], end, endName);
       },
       (error) => {
@@ -207,31 +282,50 @@ export default function Map() {
   async function handleMapClick(lat: number, lng: number) {
     setErrorMessage(null);
 
-    const result = await reverseGeocode(lat, lng);
-    setErrorMessage(result.message ?? null);
-    const name = result.name;
+    const point: [number, number] = [lat, lng];
 
-    // The marker goes down regardless of ok — the click landed somewhere real,
-    // and only the label for it is in doubt.
-    if (!start) {
-      setStart([lat, lng]);
-      setStartName(name);
-    } else if (!end) {
-      const endPoint: [number, number] = [lat, lng];
-      setEnd(endPoint);
-      setEndName(name);
-      await getRoute(start, endPoint, name);
+    // Everything the click already implies happens now, before any await. The
+    // marker's position is known the instant the user clicks — only its label
+    // needs the network — and waiting on a reverse geocode to draw it meant a
+    // cold Render container could leave the first click looking ignored for the
+    // best part of a minute. The name arrives later and fills the skeleton in.
+    const field: NameField = !start || end ? "start" : "end";
+    const routeFrom = field === "end" ? start : null;
+
+    if (field === "start") {
+      setStart(point);
+      setStartName("");
+      setStartNamePending(true);
     } else {
-      setStart([lat, lng]);
-      setEnd(null);
-      setStartName(name);
+      setEnd(point);
       setEndName("");
+      setEndNamePending(true);
+    }
+
+    // The third click starts over: the old route and its fare no longer
+    // describe anything on screen.
+    if (start && end) {
+      setEnd(null);
+      setEndName("");
+      setEndNamePending(false);
       setRouteData(null);
       setAvgFare(null);
       setFareInput("");
       setFareStatus(null);
       setAiRecommendation(null);
     }
+
+    const result = await resolvePlaceName(field, lat, lng);
+
+    // Cancelled by a newer click on the same box. That newer lookup owns the
+    // name, the skeleton and the marker now, so this one touches nothing and
+    // says nothing — a second click is not an error and must raise no banner.
+    if (result === null) return;
+
+    setErrorMessage(result.message ?? null);
+    applyPlaceName(field, result.name);
+
+    if (routeFrom) await getRoute(routeFrom, point, result.name);
   }
 
   async function handleSearchSelect(
@@ -243,6 +337,15 @@ export default function Map() {
     const point: [number, number] = [lat, lng];
 
     setErrorMessage(null);
+
+    // Search already knows the name, so any reverse geocode still running for
+    // this box is both redundant and a stale write waiting to happen. Cancel it
+    // and drop the skeleton — otherwise it would sit on top of a name that is
+    // already correct, with nothing left in flight to ever clear it.
+    geocodeAbort.current[type]?.abort();
+    geocodeAbort.current[type] = null;
+    if (type === "start") setStartNamePending(false);
+    else setEndNamePending(false);
 
     if (type === "start") {
       setStart(point);
@@ -314,6 +417,7 @@ export default function Map() {
           placeholder="From — search or click map"
           color="green"
           value={startName}
+          pending={startNamePending}
           onSelect={(lat, lng, name) =>
             handleSearchSelect("start", lat, lng, name)
           }
@@ -323,6 +427,7 @@ export default function Map() {
           placeholder="To — search or click map"
           color="amber"
           value={endName}
+          pending={endNamePending}
           onSelect={(lat, lng, name) =>
             handleSearchSelect("end", lat, lng, name)
           }

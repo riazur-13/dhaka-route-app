@@ -24,6 +24,12 @@ from fastapi.routing import APIRoute
 
 # Endpoints permitted to be `async def`, and why each one is safe.
 ASYNC_ALLOWED = {
+    # Returns a literal. No database, no outbound call, nothing to block on —
+    # the strongest entry on this list, and the only one that is safe by having
+    # no body rather than by being careful about one. Async on purpose: a health
+    # check earns its keep when the worker pool is saturated, which is precisely
+    # when a `def` version would be stuck in the queue behind the saturation.
+    "/health",
     # Awaits httpx against OSRM and touches the database not at all. There is
     # nothing here to block on except the network call it is already awaiting.
     "/route",

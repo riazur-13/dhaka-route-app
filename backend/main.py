@@ -250,6 +250,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# Touches nothing: no database, no outbound call, no work of any kind. That is
+# the whole specification, and it is what makes the `async def` safe — see the
+# ASYNC_ALLOWED entry in tests/test_endpoint_concurrency.py. Answering on the
+# event loop rather than from the worker pool is deliberate here: the moment you
+# most want a health check to reply is when every worker thread is tied up, and
+# that is exactly when a plain `def` would queue behind them.
+#
+# The frontend pings this on mount so Render's free tier starts waking the
+# container before the user's first click, which otherwise pays the entire cold
+# start with no feedback. Any request would wake it, a 404 included; this exists
+# so the wake-up is a deliberate call rather than a side effect of asking for
+# something that is not there, and so there is somewhere to put a real
+# readiness check later if one is ever wanted.
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
 @app.get("/route")
 async def get_route(
     start_lat: float,

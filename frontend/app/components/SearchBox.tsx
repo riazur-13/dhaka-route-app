@@ -15,9 +15,10 @@ interface Props {
   onSelect: (lat: number, lng: number, name: string) => void;
   color: string;
   value?: string; // ← new prop to control value from outside
+  pending?: boolean; // a place name is being looked up for this box
 }
 
-export default function SearchBox({ placeholder, onSelect, color, value = '' }: Props) {
+export default function SearchBox({ placeholder, onSelect, color, value = '', pending = false }: Props) {
   const [query, setQuery] = useState(value);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
@@ -86,24 +87,47 @@ export default function SearchBox({ placeholder, onSelect, color, value = '' }: 
           flexShrink: 0,
         }} />
 
-        <input
-          type="text"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={placeholder}
-          style={{
-            width: '100%',
-            padding: '8px 12px',
-            borderRadius: '8px',
-            border: `1px solid ${borderColor}40`,
-            background: '#1e293b',
-            color: 'white',
-            fontSize: '13px',
-            outline: 'none',
-          }}
-          onFocus={() => results.length > 0 && setShowDropdown(true)}
-          onBlur={() => setTimeout(() => setShowDropdown(false), 200)}
-        />
+        <div style={{ position: 'relative', flex: 1, display: 'flex' }}>
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={pending ? '' : placeholder}
+            style={{
+              width: '100%',
+              padding: '8px 12px',
+              borderRadius: '8px',
+              border: `1px solid ${borderColor}40`,
+              background: '#1e293b',
+              color: 'white',
+              fontSize: '13px',
+              outline: 'none',
+            }}
+            onFocus={() => results.length > 0 && setShowDropdown(true)}
+            onBlur={() => setTimeout(() => setShowDropdown(false), 200)}
+          />
+
+          {/* A pulsing bar where the name will land. Deliberately wordless —
+              a Bangla UI is planned, and a shape needs no translation. The
+              placeholder is blanked above so the two do not overlap. */}
+          {pending && (
+            <div
+              aria-hidden="true"
+              style={{
+                position: 'absolute',
+                left: '12px',
+                right: '12px',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                height: '9px',
+                borderRadius: '4px',
+                background: '#475569',
+                animation: 'skeletonPulse 1.4s ease-in-out infinite',
+                pointerEvents: 'none',
+              }}
+            />
+          )}
+        </div>
 
         {loading && (
           <div style={{
@@ -175,6 +199,15 @@ export default function SearchBox({ placeholder, onSelect, color, value = '' }: 
       <style>{`
         @keyframes spin {
           to { transform: rotate(360deg); }
+        }
+        @keyframes skeletonPulse {
+          0%, 100% { opacity: 0.35; }
+          50% { opacity: 0.8; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          @keyframes skeletonPulse {
+            0%, 100% { opacity: 0.55; }
+          }
         }
       `}</style>
     </div>

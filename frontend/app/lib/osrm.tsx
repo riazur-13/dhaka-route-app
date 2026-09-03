@@ -164,10 +164,31 @@ export async function searchPlace(query: string): Promise<PlaceResult[]> {
 }
 export type GeocodeResult = { name: string; ok: boolean; message?: string };
 
+/** Wakes the backend. Never throws, never reports, never returns anything. */
+export async function pingHealth(): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/health`);
+  } catch {
+    // Deliberately empty. This is a courtesy call to start Render's free tier
+    // waking before the user's first click; whether it succeeded is not
+    // information anyone needs. Failing loudly here would put a red banner on
+    // the screen of someone who has not yet done anything.
+  }
+}
+
+/**
+ * Returns null when the lookup was cancelled by its AbortSignal.
+ *
+ * Null is not a failure and must not be reported as one — it means the caller
+ * has already started a newer lookup for the same thing, and that newer one now
+ * owns the name, the pending state and the marker. A caller that sees null
+ * should do nothing at all.
+ */
 export async function reverseGeocode(
   lat: number,
-  lng: number
-): Promise<GeocodeResult> {
+  lng: number,
+  signal?: AbortSignal
+): Promise<GeocodeResult | null> {
   const url = `${API_BASE}/reverse-geocode?lat=${lat}&lng=${lng}`;
 
   // Always a usable name, whatever happens below. The caller drops a marker on
@@ -177,12 +198,23 @@ export async function reverseGeocode(
   let res: Response;
 
   try {
-    res = await fetch(url);
-  } catch {
+    res = await fetch(url, { signal });
+  } catch (error) {
+    // An abort arrives here as a thrown error like any other, and it is the one
+    // kind that must stay silent: the user clicking a second time is not a
+    // network problem and has no business raising a banner. Checking the signal
+    // as well as the name because not every runtime throws the same object.
+    if (signal?.aborted || (error as Error)?.name === "AbortError") return null;
     return { name: coordinateFallback, ok: false, message: UNREACHABLE };
   }
 
   const data = await res.json().catch(() => null);
+
+  // The body can be cut off mid-read too, after the headers have arrived. The
+  // parse guard above swallows that as a null body, and without this check we
+  // would fall through and answer with a coordinate name from a request the
+  // caller abandoned — the exact stale overwrite the signal exists to prevent.
+  if (signal?.aborted) return null;
 
   if (!res.ok) {
     // 502 when Nominatim is blocked or down, including a cached failure the
