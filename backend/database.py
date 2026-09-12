@@ -132,6 +132,41 @@ def init_db() -> None:
             CHECK (submitted_by IN ('passenger', 'driver', 'unknown'))
             """
         )
+        # Same reasoning as submitted_by, and the same impossibility: nobody can
+        # look at a stored fare later and tell whether it was paid to a pedal
+        # rickshaw or a battery one. Only the passenger knew, and only at the
+        # moment they typed it.
+        #
+        # This one is not merely lost information, it is actively wrong to
+        # average over. Battery rickshaws are priced below pedal ones on
+        # purpose — the motor does the work the puller's legs would — so a
+        # crowd average mixing the two drags the pedal recommendation down
+        # toward the battery rate, which is the exact direction the labour
+        # floor in config.py exists to prevent. Every row written before this
+        # column existed is 'unknown' and is therefore excluded from both
+        # vehicle's averages rather than being guessed at.
+        cursor.execute(
+            """
+            ALTER TABLE fare_submissions
+            ADD COLUMN IF NOT EXISTS vehicle_type TEXT NOT NULL DEFAULT 'unknown'
+            CHECK (vehicle_type IN ('pedal', 'battery', 'unknown'))
+            """
+        )
+        # Equality columns first, the range column last. Postgres can only use
+        # index columns up to and including the first inequality, so with
+        # distance_km ahead of vehicle_type the vehicle filter would have to be
+        # rechecked against the heap on every candidate row.
+        #
+        # The older (route_type, distance_km) index is deliberately left alone.
+        # It still serves /fares/average, which does not filter on vehicle, and
+        # dropping an index is a decision about a live table rather than a
+        # side effect of adding a column.
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS fare_submissions_route_vehicle_distance_idx
+            ON fare_submissions (route_type, vehicle_type, distance_km)
+            """
+        )
         # NUMERIC rather than DOUBLE PRECISION because these two columns are a
         # lookup key, not a measurement, and a key is only useful if `=` is
         # exact. Binary floating point stores 23.8103 as the nearest value it

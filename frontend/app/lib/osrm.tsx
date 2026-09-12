@@ -90,7 +90,11 @@ export interface FareSubmitResult {
 export async function submitFare(
   distanceKm: number,
   fareAmount: number,
-  routeType: 'walking' | 'rickshaw'
+  routeType: 'walking' | 'rickshaw',
+  // Required, not optional. The backend rejects a submission without it with a
+  // 422, and there is no value this could default to that would not be a guess
+  // written permanently into the fare table.
+  vehicleType: 'pedal' | 'battery'
 ): Promise<FareSubmitResult> {
   let res: Response;
 
@@ -102,6 +106,7 @@ export async function submitFare(
         distance_km: distanceKm,
         fare_amount: fareAmount,
         route_type: routeType,
+        vehicle_type: vehicleType,
       }),
     });
   } catch {
@@ -291,9 +296,15 @@ export async function getAIRecommendation(
   distanceKm: number,
   routeType: string,
   area: string,
+  // Null when the user has not picked a vehicle yet, which is the usual case
+  // at the moment a route is computed. The parameter is then omitted and the
+  // backend prices it as pedal — the higher of the two floors, so the fallback
+  // can never under-quote a puller's labour.
+  vehicleType: 'pedal' | 'battery' | null,
   signal?: AbortSignal
 ): Promise<RecommendationResult | null> {
-  const url = `${API_BASE}/ai-fare-recommendation?distance_km=${distanceKm}&route_type=${routeType}&area=${encodeURIComponent(area)}`;
+  const vehicleParam = vehicleType ? `&vehicle_type=${vehicleType}` : '';
+  const url = `${API_BASE}/ai-fare-recommendation?distance_km=${distanceKm}&route_type=${routeType}&area=${encodeURIComponent(area)}${vehicleParam}`;
   let res: Response;
 
   try {

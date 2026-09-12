@@ -103,6 +103,12 @@ export default function Map() {
   const [endName, setEndName] = useState("");
 
   const [fareInput, setFareInput] = useState("");
+
+  // Starts null, and nothing sets it but the user. There is no safe default:
+  // the two vehicles are priced differently on purpose, and a row labelled with
+  // the wrong one cannot be corrected later, because only the passenger ever
+  // knew which they rode. Submit stays disabled until this is answered.
+  const [vehicleType, setVehicleType] = useState<"pedal" | "battery" | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [fareStatus, setFareStatus] = useState<FareSubmitResult | null>(null);
   const [avgFare, setAvgFare] = useState<number | null>(null);
@@ -293,6 +299,7 @@ export default function Map() {
         toKm(route.distance),
         "rickshaw",
         destinationName || "Dhaka",
+        vehicleType,
         controller.signal,
       );
       if (ai === null || !isCurrent()) return;
@@ -359,6 +366,11 @@ export default function Map() {
       setRouteData(null);
       setAvgFare(null);
       setFareInput("");
+      // Cleared with the rest of the form. A selection left over from the last
+      // trip is the likeliest way to write a wrong vehicle without noticing —
+      // same rider, different rickshaw, toggle still where they left it — and
+      // that is the one mistake here nobody can undo afterwards.
+      setVehicleType(null);
       setFareStatus(null);
       setAiRecommendation(null);
     }
@@ -413,7 +425,10 @@ export default function Map() {
   }
 
   async function handleFareSubmit() {
-    if (!routeData || !fareInput) return;
+    // vehicleType guarded here as well as on the button. The button being
+    // disabled is a UI state; this is the one that decides what gets written,
+    // and it is also what narrows the type for the call below.
+    if (!routeData || !fareInput || !vehicleType) return;
     setSubmitting(true);
     setFareStatus(null);
 
@@ -421,6 +436,7 @@ export default function Map() {
       toKm(routeData.distance),
       parseFloat(fareInput),
       "rickshaw",
+      vehicleType,
     );
     setFareStatus(result);
 
@@ -615,8 +631,41 @@ export default function Map() {
               </div>
             )}
 
+            {/* Vehicle type — required before a fare can be submitted */}
+            <div
+              role="radiogroup"
+              aria-label="Rickshaw type"
+              style={{ display: "flex", gap: "6px", marginTop: "10px" }}
+            >
+              {(["pedal", "battery"] as const).map((option) => {
+                const selected = vehicleType === option;
+                return (
+                  <button
+                    key={option}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    onClick={() => setVehicleType(option)}
+                    style={{
+                      flex: 1,
+                      padding: "6px 8px",
+                      borderRadius: "6px",
+                      border: `1px solid ${selected ? "#f59e0b" : "#334155"}`,
+                      background: selected ? "#f59e0b20" : "#0f172a",
+                      color: selected ? "#fbbf24" : "#94a3b8",
+                      fontSize: "12px",
+                      fontWeight: selected ? 600 : 400,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {option === "pedal" ? "🚲 Pedal" : "🔋 Battery"}
+                  </button>
+                );
+              })}
+            </div>
+
             {/* Fare input */}
-            <div style={{ display: "flex", gap: "6px", marginTop: "10px" }}>
+            <div style={{ display: "flex", gap: "6px", marginTop: "6px" }}>
               <input
                 type="number"
                 placeholder="Your fare (৳)"
@@ -635,7 +684,7 @@ export default function Map() {
               />
               <button
                 onClick={handleFareSubmit}
-                disabled={submitting || !fareInput}
+                disabled={submitting || !fareInput || !vehicleType}
                 style={{
                   padding: "6px 12px",
                   borderRadius: "6px",

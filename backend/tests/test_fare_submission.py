@@ -3,7 +3,15 @@
 import config
 import main
 
-VALID_FARE = {"distance_km": 3.0, "fare_amount": 80.0, "route_type": "rickshaw"}
+VALID_FARE = {
+    "distance_km": 3.0,
+    "fare_amount": 80.0,
+    "route_type": "rickshaw",
+    # Required by the model — a payload without it is a 422, which is what
+    # test_vehicle_type.py asserts. Present here so these tests keep exercising
+    # throttling and validation rather than the same rejection over and over.
+    "vehicle_type": "pedal",
+}
 
 
 def submit(client, ip, payload=None):
@@ -81,7 +89,10 @@ def test_rate_limit_buckets_do_not_grow_without_bound(client):
 def test_absurd_fare_is_rejected_with_a_readable_reason(client):
     response = client.post(
         "/fares",
-        json={"distance_km": 2.0, "fare_amount": 5000.0, "route_type": "rickshaw"},
+        # Built from VALID_FARE rather than spelled out, so that a new required
+        # field cannot turn this into a 422 and quietly stop it testing the
+        # range pre-filter it was written for.
+        json={**VALID_FARE, "distance_km": 2.0, "fare_amount": 5000.0},
         headers={"x-forwarded-for": "203.0.113.99"},
     )
 

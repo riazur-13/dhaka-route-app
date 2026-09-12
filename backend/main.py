@@ -9,6 +9,7 @@ import json
 import logging
 import threading
 import time
+from typing import Literal
 from groq import Groq
 from config import GROQ_API_KEY, GROQ_MODEL, USER_AGENT
 from fare_calculator import calculate_fare
@@ -307,6 +308,17 @@ class FareSubmission(BaseModel):
     distance_km: float
     fare_amount: float
     route_type: str
+    # Literal, so Pydantic rejects anything else with a 422 before the value
+    # reaches Postgres. The CHECK constraint on the column is a backstop for
+    # writes that do not come through this model, not the primary guard — a
+    # constraint violation surfacing here would be a 500, which is the wrong
+    # answer to a client sending a bad field.
+    #
+    # Required, with no default. 'unknown' is a truthful label for the rows
+    # that predate the column and a lie for anything written after it, and a
+    # mislabelled row cannot be corrected later because only the passenger ever
+    # knew which vehicle they rode.
+    vehicle_type: Literal["pedal", "battery"]
 
 
 @app.post("/fares", dependencies=[Depends(enforce_fare_rate_limit)])
@@ -395,8 +407,14 @@ Do not write any introductory or trailing text outside of the JSON block."""
     # 4. DATA SAVED ONLY IF VALIDATION CHECKS PASS SUCCESSFULLY
     with db_cursor() as cursor:
         cursor.execute(
-            "INSERT INTO fare_submissions (distance_km, fare_amount, route_type) VALUES (%s, %s, %s)",
-            (submission.distance_km, submission.fare_amount, submission.route_type),
+            "INSERT INTO fare_submissions (distance_km, fare_amount, route_type, vehicle_type)"
+            " VALUES (%s, %s, %s, %s)",
+            (
+                submission.distance_km,
+                submission.fare_amount,
+                submission.route_type,
+                submission.vehicle_type,
+            ),
         )
 
     return {"message": "Thank you! Your verified fare submission has been saved to help other commuters."}
@@ -553,6 +571,11 @@ def ai_fare_recommendation(
             status_code=400, detail="vehicle_type must be 'pedal' or 'battery'."
         )
 
+    # vehicle_type is only ever 'pedal' or 'battery' by the time it gets here,
+    # so the equality drops every 'unknown' row on the floor. That is the point:
+    # those are the submissions from before the column existed, and a fare whose
+    # vehicle nobody recorded is evidence about neither rate. Better to fall back
+    # to the rules-based fare than to quote a number built from a mixture.
     with db_cursor() as cursor:
         cursor.execute(
             """
@@ -560,8 +583,9 @@ def ai_fare_recommendation(
             FROM fare_submissions
             WHERE distance_km BETWEEN %s AND %s
             AND route_type = %s
+            AND vehicle_type = %s
             """,
-            (distance_km - 0.5, distance_km + 0.5, route_type),
+            (distance_km - 0.5, distance_km + 0.5, route_type, vehicle_type),
         )
         avg_fare, count = cursor.fetchone() or (None, 0)
 
