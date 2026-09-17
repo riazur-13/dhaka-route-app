@@ -421,10 +421,29 @@ Do not write any introductory or trailing text outside of the JSON block."""
 
 
 @app.get("/fares/average")
-def get_average_fare(distance_km: float, route_type: str):
+def get_average_fare(distance_km: float, route_type: str, vehicle_type: str = "pedal"):
+    if vehicle_type not in ("pedal", "battery"):
+        raise HTTPException(
+            status_code=400, detail="vehicle_type must be 'pedal' or 'battery'."
+        )
+
     min_dist = distance_km - 0.5
     max_dist = distance_km + 0.5
 
+    # Scoped to one vehicle for the same reason /ai-fare-recommendation is: a
+    # battery rickshaw is priced below a pedal one deliberately, so an average
+    # over both sits between two rates and describes neither. This is the figure
+    # the app labels "Average fare" on screen, which makes it the one a rider
+    # would actually quote at a puller — the mixed version was understating the
+    # pedal rate to the person doing the pedalling.
+    #
+    # Defaulted rather than required, matching the recommendation endpoint. A
+    # default is safe here in a way it is not on /fares: this reads, it does not
+    # write, so a wrong guess shows a number for the wrong vehicle for a moment
+    # rather than putting one in the table permanently.
+    #
+    # 'unknown' rows fall out on their own, since the parameter is only ever
+    # 'pedal' or 'battery' by this point.
     with db_cursor() as cursor:
         cursor.execute(
             """
@@ -432,8 +451,9 @@ def get_average_fare(distance_km: float, route_type: str):
             FROM fare_submissions
             WHERE distance_km BETWEEN %s AND %s
             AND route_type = %s
+            AND vehicle_type = %s
             """,
-            (min_dist, max_dist, route_type),
+            (min_dist, max_dist, route_type, vehicle_type),
         )
         # An aggregate always returns exactly one row, even over no data — the
         # default is only here to satisfy fetchone()'s Optional return type.

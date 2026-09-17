@@ -42,6 +42,14 @@ def recommend(client, vehicle_type="pedal", distance_km=3.0):
     )
 
 
+def average(client, vehicle_type=None, distance_km=3.0):
+    """/fares/average. vehicle_type omitted entirely when None, as the frontend does."""
+    params = {"distance_km": distance_km, "route_type": "rickshaw"}
+    if vehicle_type is not None:
+        params["vehicle_type"] = vehicle_type
+    return client.get("/fares/average", params=params)
+
+
 class TestTheModelGuardsTheColumn:
     """Pydantic rejects before Postgres has to. The CHECK is only a backstop."""
 
@@ -168,3 +176,101 @@ class TestTheQueryIsScopedToOneVehicle:
         assert body["source"] == "crowdsourced"
         # 95 +/-15% — the battery rows at 60 are nowhere in it.
         assert (body["fare_low"], body["fare_high"]) == (81, 109)
+
+
+class TestTheAverageIsScopedToOneVehicle:
+    """/fares/average is the figure the panel labels "Average fare".
+
+    It is the number a rider would repeat out loud at a rickshaw stand, which
+    makes mixing the two vehicles here more consequential than anywhere else:
+    the mixed average understated the pedal rate to the person pedalling.
+    """
+
+    def test_the_pedal_average_ignores_battery_rows(self, client, fare_db):
+        for _ in range(2):
+            submit(client, PEDAL_FARE)
+        for _ in range(4):
+            submit(client, BATTERY_FARE)
+
+        body = average(client, "pedal").json()
+
+        assert body["submission_count"] == 2
+        assert body["average_fare"] == 95.0
+
+    def test_the_battery_average_ignores_pedal_rows(self, client, fare_db):
+        for _ in range(2):
+            submit(client, PEDAL_FARE)
+        for _ in range(4):
+            submit(client, BATTERY_FARE)
+
+        body = average(client, "battery").json()
+
+        assert body["submission_count"] == 4
+        assert body["average_fare"] == 60.0
+
+    def test_the_two_averages_differ(self, client, fare_db):
+        """Mixed, both would read 71.67 and describe neither vehicle."""
+        for _ in range(2):
+            submit(client, PEDAL_FARE)
+        for _ in range(4):
+            submit(client, BATTERY_FARE)
+
+        assert average(client, "pedal").json()["average_fare"] == 95.0
+        assert average(client, "battery").json()["average_fare"] == 60.0
+
+    def test_omitting_the_parameter_reads_the_pedal_average(self, client, fare_db):
+        """What the frontend sends before the user has picked a vehicle.
+
+        Pedal is the higher-floored of the two, so the fallback cannot
+        understate what a puller should be paid.
+        """
+        submit(client, PEDAL_FARE)
+        submit(client, BATTERY_FARE)
+
+        assert average(client).json() == average(client, "pedal").json()
+
+    def test_rows_predating_the_column_are_excluded(self, client, fare_db):
+        with database.db_cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO fare_submissions
+                    (distance_km, fare_amount, route_type, vehicle_type)
+                VALUES (3.0, 200.0, 'rickshaw', 'unknown')
+                """
+            )
+
+        assert fare_db.count() == 1
+        assert average(client, "pedal").json()["submission_count"] == 0
+        assert average(client, "battery").json()["submission_count"] == 0
+
+    def test_an_unrecognised_vehicle_type_is_400_not_500(self, client):
+        response = average(client, "helicopter")
+
+        assert response.status_code == 400
+        assert isinstance(response.json()["detail"], str)
+
+    def test_no_submissions_is_still_a_valid_answer(self, client, fare_db):
+        """A null average with zero submissions is data, not a failure."""
+        body = average(client, "battery").json()
+
+        assert body["average_fare"] is None
+        assert body["submission_count"] == 0
+
+
+class TestTheTwoEndpointsAgree:
+    """The panel shows both figures at once; they must describe one vehicle."""
+
+    def test_the_average_and_the_recommendation_see_the_same_rows(
+        self, client, fare_db
+    ):
+        for _ in range(25):
+            submit(client, PEDAL_FARE)
+        for _ in range(25):
+            submit(client, BATTERY_FARE)
+
+        for vehicle in ("pedal", "battery"):
+            assert (
+                average(client, vehicle).json()["submission_count"]
+                == recommend(client, vehicle).json()["sample_size"]
+                == 25
+            )
