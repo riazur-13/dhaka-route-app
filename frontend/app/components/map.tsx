@@ -144,6 +144,18 @@ export default function Map() {
   // are three parts of a single answer rather than two independent boxes.
   const routeAbort = useRef<AbortController | null>(null);
 
+  // True only while the two fare figures are being fetched. Distinct from
+  // `loading`, which belongs to the route: the pill says "Finding route..." and
+  // that is not what is happening here.
+  const [faresLoading, setFaresLoading] = useState(false);
+
+  // The destination name is read through a ref rather than an effect
+  // dependency. It feeds the `area` the AI is told about, and a place name
+  // arriving or changing is not a reason to re-price a trip — listing it would
+  // spend a Groq completion every time a label settled.
+  const areaRef = useRef(endName);
+  areaRef.current = endName;
+
   // Wake the backend before the user clicks anything. Render's free tier stops
   // the container when idle, and the first request pays the whole cold start —
   // which, before this, was a map click that showed nothing at all until it
@@ -152,6 +164,84 @@ export default function Map() {
   useEffect(() => {
     void pingHealth();
   }, []);
+
+  // Both fare figures are priced per vehicle, so neither is fetched until the
+  // rider has said which one they took. Before that the panel asks the question
+  // instead of quoting a number, because a number quoted for the wrong vehicle
+  // is worse than no number: it is wrong in a way the reader cannot see.
+  //
+  // This also runs when the answer *changes*, which is the point of it being an
+  // effect rather than something hung off the button. A rider correcting a
+  // mis-tap gets both figures re-priced without having to redraw the route.
+  useEffect(() => {
+    if (!routeData || !vehicleType) return;
+
+    // Same controller the route uses, so a new route cancels stale fares and a
+    // change of vehicle cancels the previous pair. A fast double-tap on the
+    // toggle therefore cannot land its two answers out of order.
+    routeAbort.current?.abort();
+    const controller = new AbortController();
+    routeAbort.current = controller;
+    const isCurrent = () => routeAbort.current === controller;
+
+    const distanceKm = toKm(routeData.distance);
+
+    async function loadFares() {
+      setFaresLoading(true);
+
+      try {
+        // The functional form keeps the *first* failure: `errorMessage` closed
+        // over here is the previous render's value, and a reverse-geocode
+        // failure earlier in the same click may already have set one.
+        const reportFirstFailure = (message: string) =>
+          setErrorMessage((previous) => previous ?? message);
+
+        const avg = await getAverageFare(
+          distanceKm,
+          "rickshaw",
+          vehicleType,
+          controller.signal,
+        );
+        if (avg === null || !isCurrent()) return;
+
+        if (avg.ok) {
+          // averageFare null here means nobody has submitted for this distance
+          // and vehicle, which is a real answer and renders as such.
+          setAvgFare(avg.averageFare);
+          setSubmissionCount(avg.submissionCount);
+        } else {
+          reportFirstFailure(avg.message ?? "Could not load the crowdsourced fare for this trip.");
+        }
+
+        const ai = await getAIRecommendation(
+          distanceKm,
+          "rickshaw",
+          areaRef.current || "Dhaka",
+          vehicleType,
+          controller.signal,
+        );
+        if (ai === null || !isCurrent()) return;
+
+        if (ai.ok) {
+          setAiRecommendation(ai.recommendation);
+        } else {
+          reportFirstFailure(ai.message ?? "Could not load the fare advice for this trip.");
+        }
+      } finally {
+        // Only the run that still owns the screen may clear the flag, for the
+        // same reason getRoute guards its own: a superseded run switching it off
+        // would hide the fact that a newer one is still working.
+        if (isCurrent()) {
+          setFaresLoading(false);
+          routeAbort.current = null;
+        }
+      }
+    }
+
+    void loadFares();
+
+    return () => controller.abort();
+  }, [routeData, vehicleType]);
 
   /**
    * Look up a place name, cancelling any previous lookup for the same box.
@@ -217,7 +307,7 @@ export default function Map() {
         setErrorMessage(result.message ?? null);
         applyPlaceName("start", result.name);
 
-        if (end) await getRoute([lat, lng], end, endName);
+        if (end) await getRoute([lat, lng], end);
       },
       (error) => {
         const messages: Record<number, string> = {
@@ -237,12 +327,10 @@ export default function Map() {
   async function getRoute(
     startPoint: [number, number],
     endPoint: [number, number],
-    destinationName: string,
   ) {
-    // One controller for the whole chain, not one per call. fetchRoute produces
-    // the distance the other two consume, so they are three parts of a single
-    // answer — abandoning it half way and keeping the rest would leave a fare
-    // and some advice describing a route that is no longer on screen.
+    // Shared with the fare effect below rather than held separately, so that
+    // starting a new route cancels any fare lookup still running for the old
+    // one. Those figures are keyed to a distance that is no longer on screen.
     routeAbort.current?.abort();
     const controller = new AbortController();
     routeAbort.current = controller;
@@ -270,45 +358,15 @@ export default function Map() {
         return;
       }
 
-      const route = result.route;
-      setRouteData(route);
-
-      // The route is already on the map by this point and stays there. A fare
-      // we could not look up, or advice we could not fetch, is a missing
-      // extra — not a reason to throw away a route that worked.
+      // The route goes on the map now. Nothing about it depends on which
+      // rickshaw the rider took — the geometry is the geometry — so it is drawn
+      // without waiting for that question to be asked, let alone answered.
       //
-      // The functional form keeps the *first* failure: `errorMessage` closed
-      // over here is the previous render's value, and a reverse-geocode
-      // failure earlier in the same click may already have set one.
-      const reportFirstFailure = (message: string) =>
-        setErrorMessage((previous) => previous ?? message);
-
-      const avg = await getAverageFare(toKm(route.distance), "rickshaw", controller.signal);
-      if (avg === null || !isCurrent()) return;
-
-      if (avg.ok) {
-        // averageFare null here means nobody has submitted for this distance,
-        // which is a real answer and renders as such.
-        setAvgFare(avg.averageFare);
-        setSubmissionCount(avg.submissionCount);
-      } else {
-        reportFirstFailure(avg.message ?? "Could not load the crowdsourced fare for this trip.");
-      }
-
-      const ai = await getAIRecommendation(
-        toKm(route.distance),
-        "rickshaw",
-        destinationName || "Dhaka",
-        vehicleType,
-        controller.signal,
-      );
-      if (ai === null || !isCurrent()) return;
-
-      if (ai.ok) {
-        setAiRecommendation(ai.recommendation);
-      } else {
-        reportFirstFailure(ai.message ?? "Could not load the fare advice for this trip.");
-      }
+      // The two fare figures deliberately do not follow here. They are priced
+      // per vehicle, and fetching them now would mean quoting a pedal fare to
+      // someone who has not said they took a pedal rickshaw. The effect below
+      // picks them up once there is an answer.
+      setRouteData(result.route);
     } finally {
       // Only the call that still owns the screen may clear the pill. A
       // superseded one running its finally would switch "Finding route..." off
@@ -385,7 +443,7 @@ export default function Map() {
     setErrorMessage(result.message ?? null);
     applyPlaceName(field, result.name);
 
-    if (routeFrom) await getRoute(routeFrom, point, result.name);
+    if (routeFrom) await getRoute(routeFrom, point);
   }
 
   async function handleSearchSelect(
@@ -413,14 +471,14 @@ export default function Map() {
       setRouteData(null);
       setAvgFare(null);
       setAiRecommendation(null);
-      if (end) await getRoute(point, end, endName);
+      if (end) await getRoute(point, end);
     } else {
       setEnd(point);
       setEndName(name);
       setRouteData(null);
       setAvgFare(null);
       setAiRecommendation(null);
-      if (start) await getRoute(start, point, name);
+      if (start) await getRoute(start, point);
     }
   }
 
@@ -445,7 +503,14 @@ export default function Map() {
       // Only a successful refresh replaces what is on screen. If the re-read
       // fails, the previous average stays — the submission itself succeeded,
       // and blanking the figure would make it look as though it had not.
-      const avg = await getAverageFare(toKm(routeData.distance), "rickshaw");
+      // vehicleType is non-null here — handleFareSubmit returns early without
+      // it — so this refresh reads the average for the vehicle just submitted
+      // rather than whatever the panel happened to be showing before.
+      const avg = await getAverageFare(
+        toKm(routeData.distance),
+        "rickshaw",
+        vehicleType,
+      );
       if (avg.ok) {
         setAvgFare(avg.averageFare);
         setSubmissionCount(avg.submissionCount);
@@ -586,56 +651,25 @@ export default function Map() {
               {toKm(routeData.distance)} km
             </p>
 
-            {avgFare ? (
-              <p
-                style={{
-                  color: "#f59e0b",
-                  fontSize: "14px",
-                  marginTop: "6px",
-                  fontWeight: 600,
-                }}
-              >
-                ৳{avgFare} avg{" "}
-                <span
-                  style={{
-                    color: "#94a3b8",
-                    fontWeight: 400,
-                    fontSize: "12px",
-                  }}
-                >
-                  ({submissionCount} trip{submissionCount !== 1 ? "s" : ""})
-                </span>
-              </p>
-            ) : (
-              <p
-                style={{ color: "#94a3b8", fontSize: "12px", marginTop: "6px" }}
-              >
-                No fare data yet for this distance
-              </p>
-            )}
-            {/* Rickshaw distance warning */}
-            {toKm(routeData.distance) > 15 && (
-              <div
-                style={{
-                  marginTop: "6px",
-                  padding: "8px 10px",
-                  background: "#450a0a",
-                  borderRadius: "6px",
-                  border: "1px solid #dc2626",
-                }}
-              >
-                <p style={{ color: "#fca5a5", fontSize: "12px" }}>
-                  ⚠️ {toKm(routeData.distance)} km is too far for a rickshaw.
-                  Consider taking a CNG or bus instead.
-                </p>
-              </div>
-            )}
+            {/* The question comes before the number, not after it. Both fare
+                figures are priced per vehicle, so until this is answered there
+                is nothing honest to show in the space below. */}
+            <p
+              style={{
+                color: "#94a3b8",
+                fontSize: "12px",
+                marginTop: "10px",
+                marginBottom: "4px",
+              }}
+            >
+              Which rickshaw?
+            </p>
 
             {/* Vehicle type — required before a fare can be submitted */}
             <div
               role="radiogroup"
               aria-label="Rickshaw type"
-              style={{ display: "flex", gap: "6px", marginTop: "10px" }}
+              style={{ display: "flex", gap: "6px" }}
             >
               {(["pedal", "battery"] as const).map((option) => {
                 const selected = vehicleType === option;
@@ -663,6 +697,91 @@ export default function Map() {
                 );
               })}
             </div>
+
+            {/* Three states, and the first one is the point of this whole
+                change: before a vehicle is chosen nothing has been asked for,
+                so this is a placeholder rather than a spinner. A spinner here
+                would claim work is underway that has not started. */}
+            {!vehicleType ? (
+              <p
+                style={{ color: "#64748b", fontSize: "12px", marginTop: "6px" }}
+              >
+                —
+              </p>
+            ) : faresLoading ? (
+              <p
+                style={{
+                  color: "#64748b",
+                  fontSize: "12px",
+                  marginTop: "6px",
+                  animation: "farePulse 1.4s ease-in-out infinite",
+                }}
+              >
+                —
+              </p>
+            ) : avgFare ? (
+              <>
+                <p
+                  style={{
+                    color: "#f59e0b",
+                    fontSize: "14px",
+                    marginTop: "6px",
+                    fontWeight: 600,
+                  }}
+                >
+                  ৳{avgFare} avg{" "}
+                  <span
+                    style={{
+                      color: "#94a3b8",
+                      fontWeight: 400,
+                      fontSize: "12px",
+                    }}
+                  >
+                    ({submissionCount} trip{submissionCount !== 1 ? "s" : ""})
+                  </span>
+                </p>
+                {/* The vehicle the figure above is priced for, put where the
+                    figure is rather than only on the toggle. A mis-tap is then
+                    visible exactly where the reader is already looking, which
+                    is why there is no separate undo — the toggle is the undo. */}
+                <p
+                  style={{ color: "#94a3b8", fontSize: "11px", marginTop: "2px" }}
+                >
+                  {vehicleType === "pedal" ? "Pedal rickshaw" : "Battery rickshaw"}
+                </p>
+              </>
+            ) : (
+              <>
+                <p
+                  style={{ color: "#94a3b8", fontSize: "12px", marginTop: "6px" }}
+                >
+                  No fare data yet for this distance
+                </p>
+                <p
+                  style={{ color: "#94a3b8", fontSize: "11px", marginTop: "2px" }}
+                >
+                  {vehicleType === "pedal" ? "Pedal rickshaw" : "Battery rickshaw"}
+                </p>
+              </>
+            )}
+            {/* Rickshaw distance warning */}
+            {toKm(routeData.distance) > 15 && (
+              <div
+                style={{
+                  marginTop: "6px",
+                  padding: "8px 10px",
+                  background: "#450a0a",
+                  borderRadius: "6px",
+                  border: "1px solid #dc2626",
+                }}
+              >
+                <p style={{ color: "#fca5a5", fontSize: "12px" }}>
+                  ⚠️ {toKm(routeData.distance)} km is too far for a rickshaw.
+                  Consider taking a CNG or bus instead.
+                </p>
+              </div>
+            )}
+
 
             {/* Fare input */}
             <div style={{ display: "flex", gap: "6px", marginTop: "6px" }}>
@@ -969,6 +1088,18 @@ export default function Map() {
           </Marker>
         ))}
       </MapContainer>
+
+      <style>{`
+        @keyframes farePulse {
+          0%, 100% { opacity: 0.35; }
+          50% { opacity: 0.8; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          @keyframes farePulse {
+            0%, 100% { opacity: 0.55; }
+          }
+        }
+      `}</style>
     </div>
   );
 }

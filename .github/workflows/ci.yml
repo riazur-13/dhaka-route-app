@@ -89,6 +89,12 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # Component tests, jsdom, no network — the fare endpoints are stubbed.
+      # These guard the ordering rule the UI depends on: neither fare figure may
+      # be fetched before the rider has said which rickshaw they took.
+      - name: Test
+        run: npm test
+
       # next build runs TypeScript itself, so this covers the typecheck as
       # well. A standalone `tsc --noEmit` would have to come after this step
       # regardless: it needs next-env.d.ts, which is gitignored and generated

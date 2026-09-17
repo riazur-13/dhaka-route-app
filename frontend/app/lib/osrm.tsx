@@ -139,19 +139,27 @@ export interface AverageFareResult {
 // rather than merely convenient.
 export function getAverageFare(
   distanceKm: number,
-  routeType: 'walking' | 'rickshaw'
+  routeType: 'walking' | 'rickshaw',
+  vehicleType: 'pedal' | 'battery' | null
 ): Promise<AverageFareResult>;
 export function getAverageFare(
   distanceKm: number,
   routeType: 'walking' | 'rickshaw',
+  vehicleType: 'pedal' | 'battery' | null,
   signal: AbortSignal
 ): Promise<AverageFareResult | null>;
 export async function getAverageFare(
   distanceKm: number,
   routeType: 'walking' | 'rickshaw',
+  // Null before the user has picked a vehicle. The parameter is then omitted
+  // and the backend reads the pedal average — same fallback as the
+  // recommendation endpoint, so the two figures on screen always describe the
+  // same vehicle rather than quietly disagreeing.
+  vehicleType: 'pedal' | 'battery' | null,
   signal?: AbortSignal
 ): Promise<AverageFareResult | null> {
-  const url = `${API_BASE}/fares/average?distance_km=${distanceKm}&route_type=${routeType}`; // ✅ uses API_BASE
+  const vehicleParam = vehicleType ? `&vehicle_type=${vehicleType}` : '';
+  const url = `${API_BASE}/fares/average?distance_km=${distanceKm}&route_type=${routeType}${vehicleParam}`; // ✅ uses API_BASE
   let res: Response;
 
   // `ok` is the only thing that separates a failure from a real answer here.
