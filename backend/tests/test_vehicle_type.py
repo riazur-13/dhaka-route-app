@@ -174,8 +174,9 @@ class TestTheQueryIsScopedToOneVehicle:
 
         assert body["sample_size"] == 25
         assert body["source"] == "crowdsourced"
-        # 95 +/-15% — the battery rows at 60 are nowhere in it.
-        assert (body["fare_low"], body["fare_high"]) == (81, 109)
+        # 95 +/-15% is 81-109, shown as 80-100 once both ends floor to tens.
+        # The battery rows at 60 are nowhere in it, which is the point.
+        assert (body["fare_low"], body["fare_high"]) == (80, 100)
 
 
 class TestTheAverageIsScopedToOneVehicle:
@@ -195,7 +196,8 @@ class TestTheAverageIsScopedToOneVehicle:
         body = average(client, "pedal").json()
 
         assert body["submission_count"] == 2
-        assert body["average_fare"] == 95.0
+        # Exactly 95 in the table; 100 on screen, rounded to the nearest ten.
+        assert body["average_fare"] == 100
 
     def test_the_battery_average_ignores_pedal_rows(self, client, fare_db):
         for _ in range(2):
@@ -215,7 +217,7 @@ class TestTheAverageIsScopedToOneVehicle:
         for _ in range(4):
             submit(client, BATTERY_FARE)
 
-        assert average(client, "pedal").json()["average_fare"] == 95.0
+        assert average(client, "pedal").json()["average_fare"] == 100
         assert average(client, "battery").json()["average_fare"] == 60.0
 
     def test_omitting_the_parameter_reads_the_pedal_average(self, client, fare_db):

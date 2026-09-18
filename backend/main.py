@@ -11,8 +11,12 @@ import threading
 import time
 from typing import Literal
 from groq import Groq
-from config import GROQ_API_KEY, GROQ_MODEL, USER_AGENT
-from fare_calculator import calculate_fare
+from config import BOUNDS_WIDENING_FACTOR, GROQ_API_KEY, GROQ_MODEL, USER_AGENT
+from fare_calculator import (
+    calculate_fare,
+    round_fare_for_display,
+    round_fare_nearest,
+)
 from database import (
     cache_place_failure,
     cache_place_name,
@@ -102,22 +106,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# (distance_km, min_taka_per_km, max_taka_per_km). The per-km rate climbs with
-# distance because a rickshaw puller's fatigue premium grows on longer trips,
-# and the longest trips are really roaming/hourly bookings rather than A-to-B.
-#
-# Rates are interpolated *between* anchors rather than applied as flat bands, so
-# the bounds are continuous in distance. The earlier banded version jumped from
-# 30-40 Tk/km at 12.0 km straight to 50-120 Tk/km at 12.01 km, which meant a
-# fare accepted at 12 km was rejected at 12.1 km.
-FARE_RATE_ANCHORS: list[tuple[float, float, float]] = [
-    (0.0, 20.0, 35.0),
-    (5.0, 20.0, 35.0),
-    (12.0, 30.0, 55.0),
-    (20.0, 35.0, 80.0),
-    (40.0, 40.0, 110.0),
-]
-
 # Dhaka rickshaws charge a minimum flag fare no matter how short the hop is, so
 # a plain per-km rate under-prices very short trips (0.3 km x 30 = 9 Tk, which
 # would reject the 30 Tk a puller actually charges).
@@ -125,30 +113,40 @@ MIN_PLAUSIBLE_FARE = 20.0
 MIN_PLAUSIBLE_CEILING = 40.0
 
 
-def calculate_logical_bounds(distance_km: float) -> tuple[float, float]:
-    """Return the (min, max) plausible fare in BDT for a trip of this length."""
-    first_km, first_min_rate, first_max_rate = FARE_RATE_ANCHORS[0]
-    last_km, last_min_rate, last_max_rate = FARE_RATE_ANCHORS[-1]
+def calculate_logical_bounds(
+    distance_km: float, vehicle_type: str = "pedal"
+) -> tuple[float, float]:
+    """The window a submitted fare has to fall inside to be believable.
 
-    if distance_km <= first_km:
-        min_rate, max_rate = first_min_rate, first_max_rate
-    elif distance_km >= last_km:
-        min_rate, max_rate = last_min_rate, last_max_rate
-    else:
-        min_rate, max_rate = last_min_rate, last_max_rate
-        for (lo_km, lo_min, lo_max), (hi_km, hi_min, hi_max) in zip(
-            FARE_RATE_ANCHORS, FARE_RATE_ANCHORS[1:]
-        ):
-            if lo_km <= distance_km <= hi_km:
-                ratio = (distance_km - lo_km) / (hi_km - lo_km)
-                min_rate = lo_min + (hi_min - lo_min) * ratio
-                max_rate = lo_max + (hi_max - lo_max) * ratio
-                break
+    Derived from the same rate card the app recommends from, rather than from a
+    second table of its own. It had a second table — FARE_RATE_ANCHORS — and the
+    two disagreed: a 7.3 km battery trip was advised at 141-191 and then
+    rejected at 150, because the anchors were pedal-shaped and put the lower
+    bound at 170. The app recommended a fare and refused it in the same breath.
+    One source of truth is the fix; everything else here is detail.
+
+    Widened from the recommended band because these two things are asked
+    different questions. The band answers "what should this cost", and is
+    deliberately narrow. This answers "could anyone have actually paid that",
+    and a window as tight as the band calls every real-world variation a lie.
+    See BOUNDS_WIDENING_FACTOR in config.py for why the factor is what it is.
+
+    The short-trip floors stay. A flag fare is charged whatever the distance, so
+    without them a 0.1 km hop would accept 10 Tk and reject the 30 a puller
+    charges — the bug MIN_PLAUSIBLE_FARE was added for in the first place.
+    """
+    fare = calculate_fare(
+        distance_km=distance_km,
+        vehicle_type=vehicle_type,
+        crowd_median=None,
+        crowd_count=0,
+    )
 
     return (
-        max(distance_km * min_rate, MIN_PLAUSIBLE_FARE),
-        max(distance_km * max_rate, MIN_PLAUSIBLE_CEILING),
+        max(fare["low"] / BOUNDS_WIDENING_FACTOR, MIN_PLAUSIBLE_FARE),
+        max(fare["high"] * BOUNDS_WIDENING_FACTOR, MIN_PLAUSIBLE_CEILING),
     )
+
 
 # Every accepted /fares submission costs a Groq completion, so the endpoint is
 # throttled on two axes: a per-client window for fairness, and a global window
@@ -165,7 +163,6 @@ GLOBAL_WINDOW_SECONDS = 60.0
 MAX_TRACKED_CLIENTS = 2048
 
 GLOBAL_BUCKET = "__global__"
-
 rate_limit_buckets: dict[str, deque[float]] = {}
 rate_limit_lock = threading.Lock()
 
@@ -326,7 +323,13 @@ def submit_fare(submission: FareSubmission):
     if submission.distance_km <= 0 or submission.fare_amount <= 0:
         raise HTTPException(status_code=400, detail="Invalid distance or fare amount.")
         
-    min_logical, max_logical = calculate_logical_bounds(submission.distance_km)
+    # Vehicle-aware, which it was not: the bounds were pedal-shaped for every
+    # submission, so a battery fare inside its own recommended range was judged
+    # against a pedal window and rejected as spam. Both Groq-failure fallbacks
+    # below compare against these same two numbers, so they are corrected too.
+    min_logical, max_logical = calculate_logical_bounds(
+        submission.distance_km, submission.vehicle_type
+    )
     
     # Pre-filter out completely unhinged submissions (e.g. 50 Tk for 30km or 10,000 Tk for 2km)
     if submission.fare_amount < (min_logical * 0.5) or submission.fare_amount > (max_logical * 2.0):
@@ -335,7 +338,29 @@ def submit_fare(submission: FareSubmission):
             detail="Submission rejected. The fare entered is outside a realistic range for this distance."
         )
 
-    
+
+    # The prompt used to assert "a manual rickshaw requires significant human
+    # physical exertion" for every submission. Two things were wrong with that.
+    # It is simply false for a battery rickshaw, where a motor does the work.
+    # And it told the model to lean high inside a window that was already
+    # pedal-shaped, so a battery fare was pushed up twice over before being
+    # judged too low. Describe the vehicle that was actually ridden instead.
+    if submission.vehicle_type == "battery":
+        vehicle_description = "battery-powered (motorised) rickshaw"
+        vehicle_context = (
+            f"A battery rickshaw carries the rider {submission.distance_km} km under motor "
+            "power, so it is normally cheaper than a pedal rickshaw over the same distance "
+            "and there is no fatigue premium to allow for. Weather and demand can still "
+            "raise it, but expect fares around the middle of the window."
+        )
+    else:
+        vehicle_description = "pedal (manually pulled) rickshaw"
+        vehicle_context = (
+            f"A pedal rickshaw requires significant human physical exertion over "
+            f"{submission.distance_km} km, so fatigue premiums, demand and bad weather can "
+            "naturally push the fare toward the mid-to-higher end of the window."
+        )
+
     # 2. AI RESEARCH & VALIDATION PROMPT (Deep Context Verification)
     validation_prompt = f"""You are a strict data validation assistant for Dhaka transport metrics.
 Your job is to determine if a crowdsourced fare submission is realistic or if it's fake/spam.
@@ -343,11 +368,12 @@ Your job is to determine if a crowdsourced fare submission is realistic or if it
 Trip Parameters:
 - Distance: {submission.distance_km} km
 - Mode of Travel: {submission.route_type}
+- Vehicle: {vehicle_description}
 - Fare Submitted by User: ৳{submission.fare_amount} BDT
 
 System Reference Benchmarks:
-- For this specific distance, a realistic fare fallback window is between ৳{round(min_logical, 2)} and ৳{round(max_logical, 2)} BDT.
-- Consider context: A manual rickshaw requires significant human physical exertion over {submission.distance_km} km, meaning fair demand/fatigue premiums or bad weather inflation can naturally push the fare towards the mid-to-higher end of the window.
+- For this distance on this vehicle, a realistic fare window is ৳{round(min_logical)} to ৳{round(max_logical)} BDT. This window is derived from the same rate card the app recommends from, so a fare the app itself suggested is always inside it.
+- Consider context: {vehicle_context}
 - Reject only if the value is completely unhinged spam (e.g., trying to pay ৳50 for 20 km, or ৳2000 for 2 km).
 
 Evaluate the authenticity. Respond strictly in JSON format matching this schema:
@@ -460,7 +486,11 @@ def get_average_fare(distance_km: float, route_type: str, vehicle_type: str = "p
         avg_fare, count = cursor.fetchone() or (None, 0)
 
     return {
-        "average_fare": round(avg_fare, 2) if avg_fare else None,
+        # Rounded for display only; the stored submissions keep full precision.
+        # Nearest rather than up or down, because an average describes what
+        # people paid rather than bounding what they should — neither direction
+        # protects anything here, so the least distorting rule wins.
+        "average_fare": round_fare_nearest(avg_fare) if avg_fare else None,
         "submission_count": count,
     }
 
@@ -626,6 +656,23 @@ def ai_fare_recommendation(
     # in this prompt — the per-km rates, the over-10-km roaming premium — is now
     # in config.py and fare_calculator.py, where it can be tested and reviewed.
     # Groq's only remaining job is to say it in Bengali.
+    # Rounded at the edge, not in fare_calculator: the exact figures are what the
+    # plausibility bounds and the labour floor are checked against, and a lossy
+    # number upstream of those checks would be a number nothing could verify.
+    #
+    # Both ends floor to tens, except where that would drop the low end below
+    # the vehicle's labour floor — see round_fare_for_display for why, and why
+    # the high end follows it when that happens.
+    #
+    # Assigned once, here, above everything that reads it. The prompt below and
+    # the payload further down are two consumers of one value, and the visible
+    # bug this fixes was the model being handed unrounded figures and writing
+    # them into the Bengali sentence while the JSON fields were correct. Keep
+    # these two lines and their readers in this order.
+    display_low, display_high = round_fare_for_display(
+        fare["low"], fare["high"], distance_km, vehicle_type
+    )
+
     if fare["floor_applied"]:
         tone = (
             "This range sits at the fair minimum for the labour involved. "
@@ -643,7 +690,7 @@ and do not suggest any other number.
 
 - Distance: {distance_km} km
 - Area: {area}, Dhaka, Bangladesh
-- Recommended fare: ৳{fare["low"]} to ৳{fare["high"]} BDT
+- Recommended fare: ৳{display_low} to ৳{display_high} BDT
 
 {tone}
 
@@ -656,8 +703,8 @@ Write only in Bengali."""
     # answer; the Bengali is the wrapper, and a missing wrapper is not a missing
     # answer. The frontend can render the range on its own.
     payload = {
-        "fare_low": fare["low"],
-        "fare_high": fare["high"],
+        "fare_low": display_low,
+        "fare_high": display_high,
         "source": fare["source"],
         "sample_size": fare["sample_size"],
         "floor_applied": fare["floor_applied"],

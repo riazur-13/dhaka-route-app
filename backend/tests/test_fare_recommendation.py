@@ -57,10 +57,12 @@ def test_the_fare_comes_from_python_not_from_the_model(client, groq_says):
 
     body = recommend(client).json()
 
-    # 20 + 25*3 = 95, spread +/-15%. Asserted as literals because the whole
-    # point of the change is that this is now predictable.
-    assert body["fare_low"] == 81
-    assert body["fare_high"] == 109
+    # 20 + 25*3 = 95, spread +/-15% gives 81-109 exactly, displayed as 80-100:
+    # both ends floored to tens. The floor here is 74, so 80 clears it and the
+    # clamp does not fire. Asserted as literals because the whole point of the
+    # change is that this is now predictable.
+    assert body["fare_low"] == 80
+    assert body["fare_high"] == 100
     assert body["source"] == "rules"
     assert body["sample_size"] == 0
     assert body["floor_applied"] is False
@@ -91,7 +93,7 @@ class TestTheNumbersSurviveGroq:
         body = response.json()
 
         assert response.status_code == 200
-        assert (body["fare_low"], body["fare_high"]) == (81, 109)
+        assert (body["fare_low"], body["fare_high"]) == (80, 100)
         assert body["recommendation_available"] is False
         assert body["recommendation"]
 
@@ -119,7 +121,7 @@ class TestTheNumbersSurviveGroq:
 
         assert body["recommendation_available"] is False
         assert body["recommendation"] is not None
-        assert (body["fare_low"], body["fare_high"]) == (81, 109)
+        assert (body["fare_low"], body["fare_high"]) == (80, 100)
 
     def test_a_whitespace_only_completion_is_also_a_failure(self, client, groq_says):
         groq_says(content="   \n  ")

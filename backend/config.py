@@ -119,3 +119,28 @@ CROWDSOURCE_FULL_TRUST = 20
 # Stamped so a fare quoted in a screenshot can be dated. Fuel, rice and rent all
 # move; a rate card with no date on it is a rate card nobody dares change.
 FARE_RATES_EFFECTIVE_DATE = "2026-08"
+
+
+# How much wider the plausibility window is than the recommended range.
+#
+# The window exists to catch lies, not to set prices, so it has to be
+# meaningfully wider than the +/-15% band the app actually recommends —
+# otherwise the app rejects the very fare it just advised, which is the bug this
+# constant was introduced to fix.
+#
+# 2.0 either side, so the window spans roughly half the fair rate to double it.
+# That covers what people really pay: hard bargaining and a rounded-down short
+# hop at the bottom, rain, night, rush hour and luggage at the top. Beyond 2x in
+# either direction is where "plausible" genuinely stops and Groq is being asked
+# to rule on something absurd.
+#
+# Symmetric, though asymmetric is arguably more honest — surge can double a fare
+# while nothing much pushes it to a quarter. Rejected because the window is a
+# spam filter rather than a model of the market, and two numbers here would
+# invite tuning it like one.
+BOUNDS_WIDENING_FACTOR = 2.0
+
+# Displayed fares are rounded to this. Nobody negotiates a rickshaw in single
+# taka, and a range of "141 to 191" reads as a calculation rather than a price.
+# Storage keeps full precision — this applies at the point of display only.
+FARE_DISPLAY_STEP = 10

@@ -30,6 +30,7 @@ from config import (
     FARE_FLOOR_PER_KM_PEDAL,
     FARE_PER_KM_BATTERY,
     FARE_PER_KM_PEDAL,
+    FARE_DISPLAY_STEP,
     FARE_RANGE_SPREAD,
     LONG_TRIP_MULTIPLIER,
     LONG_TRIP_THRESHOLD_KM,
@@ -184,3 +185,57 @@ def calculate_fare(
         "floor_applied": floor_applied,
         "sample_size": crowd_count,
     }
+
+
+def round_fare_for_display(
+    low: float,
+    high: float,
+    distance_km: float,
+    vehicle_type: VehicleType,
+) -> tuple[int, int]:
+    """Round a recommended band to whole tens for the screen.
+
+    Nobody negotiates a rickshaw in single taka. "114 to 154" reads as the
+    output of a calculation; "110 to 150" reads as a price.
+
+    Both ends floor. Flooring rather than rounding to nearest because a quoted
+    range is an opening position, and the honest direction to move an opening
+    position is the one that does not overstate it.
+
+    Callers pass the exact figures. The bounds and floor checks upstream run
+    against those, not against these — a lossy number ahead of a check is a
+    number nothing can verify.
+    """
+    floored_low = math.floor(low / FARE_DISPLAY_STEP) * FARE_DISPLAY_STEP
+    floored_high = math.floor(high / FARE_DISPLAY_STEP) * FARE_DISPLAY_STEP
+
+    # Flooring is the one operation here that can cross the labour floor, and
+    # the labour floor is the single line the whole pricing policy in config.py
+    # exists to hold. calculate_fare has already lifted `low` to sit on or above
+    # it; rounding down afterwards can drop it straight back under. When that
+    # would happen, round away from the floor instead of through it.
+    #
+    # The high end ceils with it rather than staying floored. Lifting only the
+    # low end collapses the band on short trips — a 0.6 km pedal ride computes
+    # 31-42, which would floor to 30-40 and then clamp to "40 to 40". A
+    # zero-width band tells a passenger to refuse any counter-offer, on exactly
+    # the trips where a puller has least room to bargain, and calculate_fare
+    # already rejects that shape for the same reason.
+    if floored_low < calculate_floor(distance_km, vehicle_type):
+        floored_low = math.ceil(low / FARE_DISPLAY_STEP) * FARE_DISPLAY_STEP
+        floored_high = math.ceil(high / FARE_DISPLAY_STEP) * FARE_DISPLAY_STEP
+
+    # Belt and braces, as elsewhere in this module: nothing above should be able
+    # to produce a band that runs backwards, and this is cheaper than finding
+    # out that something can.
+    return floored_low, max(floored_high, floored_low)
+
+
+def round_fare_nearest(value: float) -> int:
+    """Round a standalone figure to the nearest display step.
+
+    For the crowdsourced average, which is a description of what people paid
+    rather than a bound on what they should pay. Neither direction protects
+    anything here, so the least distorting rule is the right one.
+    """
+    return int(math.floor(value / FARE_DISPLAY_STEP + 0.5)) * FARE_DISPLAY_STEP

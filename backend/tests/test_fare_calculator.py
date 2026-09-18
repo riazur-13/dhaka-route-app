@@ -16,7 +16,13 @@ the thing being protected, not the number.
 
 import config
 import pytest
-from fare_calculator import calculate_fare, calculate_floor, calculate_rules_fare
+from fare_calculator import (
+    calculate_fare,
+    calculate_floor,
+    calculate_rules_fare,
+    round_fare_for_display,
+    round_fare_nearest,
+)
 
 
 class TestKnownDistances:
@@ -230,3 +236,78 @@ class TestVeryShortTrips:
             for count in (0, 5, 12, 20, 500):
                 result = calculate_fare(2.0, "pedal", median, count)
                 assert result["low"] <= result["high"], (median, count)
+
+
+class TestDisplayRounding:
+    """Rounding a band for the screen: floor both ends, clamp at the floor.
+
+    Pure arithmetic, so it lives here rather than behind an HTTP call. These
+    assertions used to sweep distances through the endpoint, which meant one
+    Neon round trip per case for something that touches no database at all.
+    test_fare_consistency.py keeps a handful of endpoint tests for the wiring.
+    """
+
+    DISTANCES = [round(0.05 * i, 2) for i in range(1, 400)]
+    VEHICLES = ("pedal", "battery")
+
+    def every_case(self):
+        for distance in self.DISTANCES:
+            for vehicle in self.VEHICLES:
+                exact = calculate_fare(distance, vehicle, None, 0)
+                shown = round_fare_for_display(
+                    exact["low"], exact["high"], distance, vehicle
+                )
+                yield distance, vehicle, exact, shown
+
+    def test_both_ends_are_always_multiples_of_ten(self):
+        for distance, vehicle, _, (low, high) in self.every_case():
+            assert low % 10 == 0, f"{distance} km {vehicle}"
+            assert high % 10 == 0, f"{distance} km {vehicle}"
+
+    def test_the_low_end_never_falls_below_the_labour_floor(self):
+        """The clamp's whole reason for existing."""
+        for distance, vehicle, _, (low, _high) in self.every_case():
+            assert low >= calculate_floor(distance, vehicle), f"{distance} km {vehicle}"
+
+    def test_the_band_never_collapses_or_inverts(self):
+        """Clamping only the low end would collapse it on short trips."""
+        for distance, vehicle, _, (low, high) in self.every_case():
+            assert low < high, f"{distance} km {vehicle} gave {low}-{high}"
+
+    def test_both_ends_floor_when_the_clamp_does_not_fire(self):
+        """Flooring never overstates what the rate card says."""
+        for distance, vehicle, exact, (low, high) in self.every_case():
+            clamped = (exact["low"] // 10) * 10 < calculate_floor(distance, vehicle)
+            if not clamped:
+                assert low <= exact["low"], f"{distance} km {vehicle}"
+                assert high <= exact["high"], f"{distance} km {vehicle}"
+
+    def test_the_reported_case(self):
+        """5.7 km battery computed 114-154 and was displayed unrounded."""
+        exact = calculate_fare(5.7, "battery", None, 0)
+        assert (exact["low"], exact["high"]) == (114, 154)
+
+        # 110, not 120: the low end floors rather than rounding up or to nearest.
+        assert round_fare_for_display(114, 154, 5.7, "battery") == (110, 150)
+
+    def test_the_clamp_fires_on_a_short_pedal_trip(self):
+        """0.6 km pedal: exact 31-42, labour floor 31.
+
+        Flooring the low end gives 30, under the floor. The clamp rounds up
+        instead, and the high end follows so the band keeps its width.
+        """
+        exact = calculate_fare(0.6, "pedal", None, 0)
+        assert (exact["low"], exact["high"]) == (31, 42), "premise moved"
+        assert calculate_floor(0.6, "pedal") == 31, "premise moved"
+
+        assert round_fare_for_display(31, 42, 0.6, "pedal") == (40, 50)
+
+    def test_the_clamp_fires_on_a_short_battery_trip(self):
+        assert round_fare_for_display(31, 42, 0.7, "battery") == (40, 50)
+        assert calculate_floor(0.7, "battery") == 31
+
+    def test_the_average_rounds_to_nearest_not_down(self):
+        """A standalone figure, not a bound — neither direction protects it."""
+        assert round_fare_nearest(95.0) == 100
+        assert round_fare_nearest(94.0) == 90
+        assert round_fare_nearest(60.0) == 60
