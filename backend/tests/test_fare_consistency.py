@@ -206,31 +206,8 @@ class TestThePromptAndTheFieldsAgree:
     are correct. One value, two consumers — this is what holds them together.
     """
 
-    @pytest.fixture
-    def groq_prompt(self, monkeypatch):
-        """Capture the prompt text sent to Groq for the recommendation call."""
-        import types
-
-        sent = {}
-
-        def create(**kwargs):
-            sent["prompt"] = kwargs["messages"][0]["content"]
-            message = types.SimpleNamespace(
-                content="ভাড়া যুক্তিসঙ্গত। দরদাম করুন। শুভ যাত্রা।"
-            )
-            choice = types.SimpleNamespace(message=message, finish_reason="stop")
-            return types.SimpleNamespace(choices=[choice])
-
-        monkeypatch.setattr(
-            main,
-            "groq_client",
-            types.SimpleNamespace(
-                chat=types.SimpleNamespace(
-                    completions=types.SimpleNamespace(create=create)
-                )
-            ),
-        )
-        return sent
+    # groq_prompt lives in conftest.py — the prose-framing tests need the same
+    # capture, and two copies of a fixture is two things to keep in step.
 
     @pytest.mark.parametrize(
         "distance,vehicle",

@@ -13,6 +13,7 @@ from typing import Literal
 from groq import Groq
 from config import BOUNDS_WIDENING_FACTOR, GROQ_API_KEY, GROQ_MODEL, USER_AGENT
 from fare_calculator import (
+    VehicleType,
     calculate_fare,
     round_fare_for_display,
     round_fare_nearest,
@@ -114,7 +115,7 @@ MIN_PLAUSIBLE_CEILING = 40.0
 
 
 def calculate_logical_bounds(
-    distance_km: float, vehicle_type: str = "pedal"
+    distance_km: float, vehicle_type: VehicleType = "pedal"
 ) -> tuple[float, float]:
     """The window a submitted fare has to fall inside to be believable.
 
@@ -561,10 +562,19 @@ async def reverse_geocode(lat: float, lng: float):
 
     url = "https://nominatim.openstreetmap.org/reverse"
 
+    # accept-language matches what /search sends. Without it Nominatim answers
+    # in each place's default `name` tag, which around Dhaka is Bengali — so a
+    # map click returned "বারিধারা ডিওএইচএস" and wrote it into a search box
+    # whose own lookups ask for English. One app, two calls, two languages,
+    # feeding each other's input.
+    #
+    # It changes only what comes back, never what matches: the same coordinates
+    # under en and bn return the same place in different scripts.
     params = {
         "lat": lat,
         "lon": lng,
         "format": "json",
+        "accept-language": "en",
     }
 
     try:
@@ -682,22 +692,46 @@ def ai_fare_recommendation(
     else:
         tone = "Include one practical bargaining tip."
 
+    # The framing is specified here rather than left to the model. It used to
+    # open with "The fare has already been calculated", which was meant as an
+    # instruction about the model's behaviour and was read as a description of
+    # the fare's status — so the Bengali came back saying the fare had been
+    # নির্ধারিত (determined), then advised negotiating in the next breath. Two
+    # claims that cannot both be true, and the first one is not ours to make:
+    # this app read a rate card, it did not consult an authority.
+    #
+    # So the "do not invent a number" instruction is now phrased purely as
+    # behaviour, and what the number *means* is stated explicitly instead of
+    # being inferred.
     prompt = f"""You are a helpful Dhaka transport assistant.
 Write a short, friendly note in Bengali (বাংলা) language only.
 
-The fare has already been calculated. Do not change it, do not recalculate it,
-and do not suggest any other number.
+WHAT THIS NUMBER IS: an estimate worked out from a rate card, given to help the
+passenger negotiate with the rickshaw puller.
+
+WHAT IT IS NOT: it is not official, not fixed, and not set by any authority,
+government body or rickshaw association. No one is obliged to accept it.
 
 - Distance: {distance_km} km
 - Area: {area}, Dhaka, Bangladesh
-- Recommended fare: ৳{display_low} to ৳{display_high} BDT
+- Estimated fair fare: ৳{display_low} to ৳{display_high} BDT
+
+Use these two figures exactly as given. Do not invent, recalculate or suggest
+any other number.
+
+FORBIDDEN: do not write that the fare has been determined, decided, settled or
+established. Do not use নির্ধারিত, নির্ধারণ, ধার্য or চূড়ান্ত. Do not suggest
+any authority stands behind the number. Present it as a guide the passenger can
+negotiate around, so that your advice and your description of the number agree.
 
 {tone}
 
-CRITICAL INSTRUCTION: Your entire response MUST be exactly 3 or 4 sentences long.
-Do not write less than 3 sentences, and do not write more than 4 sentences. Make
-sure the final sentence is complete. State the fare range exactly as given above.
-Write only in Bengali."""
+CRITICAL INSTRUCTION: Your entire response MUST be 2 to 3 short sentences — the
+fare range, and one practical note about negotiating. Nothing else. No greeting,
+no sign-off, no explanation of how the estimate was made. It is read by someone
+standing in the street with a rickshaw waiting, so it must be readable at a
+glance. Make sure the final sentence is complete. State the fare range exactly
+as given above. Write only in Bengali."""
 
     # Built before the Groq call so the numbers survive it. The fare is the
     # answer; the Bengali is the wrapper, and a missing wrapper is not a missing
@@ -718,9 +752,19 @@ Write only in Bengali."""
             messages=[{"role": "user", "content": prompt}],
             # Same reasoning-token budget problem as the validation call, plus
             # Bengali runs to more tokens per sentence than English. Measured
-            # 390-550 tokens for the 3-4 sentences this prompt asks for, so 1024
-            # was close enough to the ceiling to truncate mid-sentence.
-            max_tokens=2048,
+            # 390-550 tokens of content back when this asked for 3-4 sentences,
+            # and 1024 was still close enough to the ceiling to truncate
+            # mid-sentence — because reasoning tokens are billed against this
+            # budget and emitted before any content at all.
+            #
+            # Lowered from 2048 when the ask dropped to 2-3 short sentences, but
+            # deliberately not in proportion. Only the content half shrinks.
+            # Reasoning tracks how hard the task is rather than how long the
+            # answer is, and the prompt above now carries more constraints than
+            # it did, so that half will not shrink and may grow. A proportional
+            # cut would come straight out of reasoning and bring back the empty
+            # response this endpoint already has a fallback for.
+            max_tokens=1536,
             temperature=0.3,
             timeout=GROQ_TIMEOUT_SECONDS,
         )

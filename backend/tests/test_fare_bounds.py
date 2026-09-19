@@ -171,5 +171,13 @@ def test_the_window_is_wider_than_the_recommendation():
 
 
 def test_an_unknown_vehicle_type_is_rejected():
+    """Deliberately passing what the type system forbids.
+
+    vehicle_type is Literal["pedal", "battery"], so a checker rejects this call
+    — which is the point. The annotation stops a mistake reaching here from
+    typed code; this test covers the paths that are not typed, like a value
+    arriving off the wire. Both guards are wanted, so the ignore is narrow and
+    deliberate rather than a way of quieting the checker.
+    """
     with pytest.raises(ValueError, match="vehicle_type"):
-        bounds(3.0, "helicopter")
+        bounds(3.0, "helicopter")  # type: ignore[arg-type]

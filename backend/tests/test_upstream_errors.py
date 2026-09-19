@@ -152,3 +152,39 @@ def test_a_working_search_still_works(client, upstream):
 
     assert response.status_code == 200
     assert response.json()["results"][0]["name"] == "Gulshan 1, Gulshan, Dhaka"
+
+
+@pytest.mark.parametrize("call", [reverse_geocode, search])
+def test_both_nominatim_calls_ask_for_the_same_language(client, upstream, call):
+    """One app should not speak to one service in two languages.
+
+    /search asked for English and /reverse-geocode asked for nothing, so
+    Nominatim answered the reverse lookup in each place's default name tag —
+    Bengali, around Dhaka. A map click then wrote "বারিধারা ডিওএইচএস" into a
+    search box whose own lookups are English, so the two halves of the app fed
+    each other input neither could use.
+    """
+    upstream.replies(status_code=200, json=[])
+
+    call(client)
+
+    sent = dict(upstream.requests[0].url.params)
+    assert sent.get("accept-language") == "en", f"sent {sent}"
+
+
+def test_the_language_asked_for_does_not_narrow_the_search(client, upstream):
+    """accept-language governs what comes back, not what matches.
+
+    Worth recording because it is the obvious wrong theory for why an English
+    query finds nothing: the real cause is that OpenStreetMap stores one
+    transliteration per place — বরুয়া is filed as "Borua", so "Barua" matches
+    nothing — and no language header changes that.
+    """
+    upstream.replies(status_code=200, json=[])
+
+    client.get("/search", params={"query": "Barua"})
+
+    sent = dict(upstream.requests[0].url.params)
+    assert sent["accept-language"] == "en"
+    # The query itself goes up unaltered, in whatever script the user typed.
+    assert "Barua" in sent["q"]

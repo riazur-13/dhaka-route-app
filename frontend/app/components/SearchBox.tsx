@@ -25,6 +25,11 @@ export default function SearchBox({ placeholder, onSelect, color, value = '', pe
   const [showDropdown, setShowDropdown] = useState(false);
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Why the last search came back empty. An empty list on its own cannot say:
+  // "nothing matched" and "we could not ask" look identical from the results
+  // array, and they need opposite advice.
+  const [searchError, setSearchError] = useState<string | null>(null);
+
   // Update input when parent sets a new value (e.g. from map click)
  const isExternalUpdate = useRef(false);
 
@@ -49,6 +54,7 @@ export default function SearchBox({ placeholder, onSelect, color, value = '', pe
     if (query.length < 2) {
       debounceRef.current = setTimeout(() => {
         setResults([]);
+        setSearchError(null);
         setShowDropdown(false);
       }, 0);
       return;
@@ -56,8 +62,9 @@ export default function SearchBox({ placeholder, onSelect, color, value = '', pe
 
     debounceRef.current = setTimeout(async () => {
       setLoading(true);
-      const data = await searchPlace(query);
-      setResults(data);
+      const outcome = await searchPlace(query);
+      setResults(outcome.places);
+      setSearchError(outcome.ok ? null : outcome.message ?? 'Place search is unavailable right now.');
       setShowDropdown(true);
       setLoading(false);
     }, 400);
@@ -185,14 +192,33 @@ export default function SearchBox({ placeholder, onSelect, color, value = '', pe
           right: '0',
           marginTop: '4px',
           background: '#1e293b',
-          border: '1px solid #334155',
+          border: `1px solid ${searchError ? '#ef4444' : '#334155'}`,
           borderRadius: '8px',
           zIndex: 2000,
           padding: '10px 12px',
           fontSize: '13px',
           color: '#94a3b8',
         }}>
-          No places found for &quot;{query}&quot;
+          {searchError ? (
+            // An outage, not a spelling problem. Suggesting Bengali here would
+            // send the user chasing something that is not theirs to fix.
+            <span>{searchError}</span>
+          ) : (
+            // A genuinely empty result set. "No places found" was usually a
+            // lie: the place exists, and OpenStreetMap simply stores a
+            // different English transliteration of it than the one typed —
+            // বরুয়া is filed as "Borua", so "Barua" matches nothing. The
+            // Bengali spelling is the one that is unambiguous, so ask for it.
+            <span
+              style={{
+                fontFamily: '"Noto Sans Bengali", sans-serif',
+                lineHeight: 1.6,
+                display: 'block',
+              }}
+            >
+              &quot;{query}&quot; খুঁজে পাওয়া যায়নি। জায়গার নাম বাংলায় লিখে দেখুন।
+            </span>
+          )}
         </div>
       )}
 

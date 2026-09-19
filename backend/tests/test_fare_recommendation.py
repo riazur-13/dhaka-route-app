@@ -194,3 +194,76 @@ class TestCrowdsourcedData:
         body = recommend(client).json()
 
         assert body["sample_size"] == fare_db.count()
+
+
+class TestHowThePromptFramesTheFare:
+    """What the model is *asked* to say about the number.
+
+    The Bengali came back saying the fare had been নির্ধারিত — determined — and
+    then advised negotiating in the next sentence. Two claims that cannot both
+    be true, and the first is not ours to make: this app read a rate card, it
+    did not consult an authority.
+
+    These assert the prompt, not the output. Whether the model complies is
+    tested in test_recommendation_prose.py, which needs a real key and is
+    skipped by default. This layer is what CI can actually hold.
+    """
+
+    def test_the_wording_that_caused_the_bug_is_gone(self, client, groq_prompt):
+        """A regression guard on the exact phrase.
+
+        "The fare has already been calculated" was meant as an instruction
+        about the model's behaviour and was read as a description of the fare's
+        status, then repeated to the user as fact.
+        """
+        recommend(client)
+
+        assert "has already been calculated" not in groq_prompt["prompt"]
+
+    def test_the_prompt_says_what_the_number_is(self, client, groq_prompt):
+        recommend(client)
+        prompt = groq_prompt["prompt"]
+
+        assert "estimate" in prompt
+        assert "rate card" in prompt
+        assert "negotiate" in prompt
+
+    def test_the_prompt_says_what_the_number_is_not(self, client, groq_prompt):
+        recommend(client)
+        prompt = groq_prompt["prompt"]
+
+        assert "not official" in prompt
+        assert "not fixed" in prompt
+        assert "not set by any authority" in prompt
+
+    def test_the_prompt_forbids_the_settled_framing_by_name(self, client, groq_prompt):
+        """Naming the Bengali terms, not just the English idea.
+
+        The model is writing Bengali; a rule expressed only in English about
+        English words is a rule about the wrong language.
+        """
+        prompt = groq_prompt
+        recommend(client)
+
+        for term in ("নির্ধারিত", "নির্ধারণ", "ধার্য", "চূড়ান্ত"):
+            assert term in prompt["prompt"], f"{term} not named as forbidden"
+
+    def test_the_prompt_asks_for_two_to_three_short_sentences(
+        self, client, groq_prompt
+    ):
+        recommend(client)
+        prompt = groq_prompt["prompt"]
+
+        assert "2 to 3 short sentences" in prompt
+        assert "3 or 4 sentences" not in prompt, "the old length instruction survived"
+
+    def test_the_token_budget_keeps_headroom_for_reasoning(self, client, groq_prompt):
+        """Shorter output shrinks the content half only.
+
+        Reasoning tokens are billed against this budget and emitted first, so a
+        cut in proportion to the length would starve them and bring back the
+        empty response. 1024 already truncated mid-sentence once.
+        """
+        recommend(client)
+
+        assert groq_prompt["max_tokens"] >= 1536

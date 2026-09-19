@@ -54,6 +54,43 @@ def _stub_groq(create):
     )
 
 
+def pytest_configure(config):
+    """Register the opt-in marker. There is no pytest.ini in this project."""
+    config.addinivalue_line(
+        "markers",
+        "live_groq: sends real Groq completions. Skipped unless GROQ_API_KEY is "
+        "a real key. Run with: pytest -m live_groq",
+    )
+
+
+# The placeholder set at import time above. Anything else is taken to be a real
+# key, which is what the live_groq tests need and what everything else must not
+# have — the rest of this suite bills nobody.
+PLACEHOLDER_GROQ_KEY = "test-key-never-used"
+
+
+@pytest.fixture
+def groq_prompt(monkeypatch):
+    """Capture the prompt text sent to Groq, and answer with canned Bengali.
+
+    Shared by the prose-framing tests and the rounding tests, because both need
+    to see what the model was actually asked rather than what it replied.
+    """
+    sent = {}
+
+    def create(**kwargs):
+        sent["prompt"] = kwargs["messages"][0]["content"]
+        sent["max_tokens"] = kwargs.get("max_tokens")
+        message = types.SimpleNamespace(
+            content="ভাড়া যুক্তিসঙ্গত। দরদাম করে নিন।"
+        )
+        choice = types.SimpleNamespace(message=message, finish_reason="stop")
+        return types.SimpleNamespace(choices=[choice])
+
+    monkeypatch.setattr(main, "groq_client", _stub_groq(create))
+    return sent
+
+
 @pytest.fixture(autouse=True)
 def reset_rate_limits():
     """Rate-limit buckets are module-level, so they leak between tests."""

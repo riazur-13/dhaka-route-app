@@ -201,26 +201,52 @@ export interface PlaceResult {
   lng: number;
 }
 
-export async function searchPlace(query: string): Promise<PlaceResult[]> {
+export interface SearchResults {
+  ok: boolean;
+  places: PlaceResult[];
+  message?: string;
+}
+
+/**
+ * `ok` separates "found nothing" from "could not look".
+ *
+ * Both used to return a bare empty array, so the box said "No places found"
+ * whether Nominatim had no match or was refusing us outright. Those need
+ * different messages: telling someone to try the Bengali spelling while the
+ * service is down sends them chasing a problem that is not theirs.
+ */
+export async function searchPlace(query: string): Promise<SearchResults> {
   const url = `${API_BASE}/search?query=${encodeURIComponent(query)}`;
   let res: Response;
 
   try {
     res = await fetch(url);
   } catch {
-    return [];
+    return { ok: false, places: [], message: UNREACHABLE };
   }
-
-  // Anything but a 200 has no `results` at all — the backend answers 502 with a
-  // `detail` when Nominatim is blocked or down. This used to return undefined,
-  // which the caller put straight into state and then read .length off.
-  if (!res.ok) return [];
 
   const data = await res.json().catch(() => null);
 
+  // Anything but a 200 has no `results` at all — the backend answers 502 with a
+  // `detail` when Nominatim is blocked or down.
+  if (!res.ok) {
+    const detail = typeof data?.detail === 'string' ? data.detail : null;
+    return {
+      ok: false,
+      places: [],
+      message: detail || 'Place search is unavailable right now.',
+    };
+  }
+
   // Array.isArray, not `?? []`: the guard has to hold against any shape, not
   // just null and undefined. Everything downstream calls .length and .map.
-  return Array.isArray(data?.results) ? (data.results as PlaceResult[]) : [];
+  // A 200 carrying something other than an array is a broken answer, not an
+  // empty one, so it is reported rather than shown as "no matches".
+  if (!Array.isArray(data?.results)) {
+    return { ok: false, places: [], message: 'Place search is unavailable right now.' };
+  }
+
+  return { ok: true, places: data.results as PlaceResult[] };
 }
 export type GeocodeResult = { name: string; ok: boolean; message?: string };
 
