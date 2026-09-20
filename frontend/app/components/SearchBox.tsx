@@ -18,6 +18,19 @@ interface Props {
   pending?: boolean; // a place name is being looked up for this box
 }
 
+/**
+ * Does this query contain Bengali characters? U+0980–U+09FF is the Bengali block.
+ *
+ * A regex rather than a language-detection library, because the question is
+ * exactly "are any of these characters Bengali" and the Unicode range answers
+ * it outright. A library would be a dependency for a decision already made.
+ *
+ * Any match counts, so mixed input takes the Bengali branch. That is the
+ * intent: someone who typed even one Bengali character does not need to be
+ * told the script exists.
+ */
+const CONTAINS_BENGALI = /[ঀ-৿]/;
+
 export default function SearchBox({ placeholder, onSelect, color, value = '', pending = false }: Props) {
   const [query, setQuery] = useState(value);
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -200,15 +213,36 @@ export default function SearchBox({ placeholder, onSelect, color, value = '', pe
           color: '#94a3b8',
         }}>
           {searchError ? (
-            // An outage, not a spelling problem. Suggesting Bengali here would
-            // send the user chasing something that is not theirs to fix.
+            // An outage, not a spelling problem. Suggesting anything about
+            // spelling here would send the user chasing something that is not
+            // theirs to fix. Stays outermost: an error is an error whatever
+            // script it was typed in.
             <span>{searchError}</span>
+          ) : CONTAINS_BENGALI.test(query) ? (
+            // They typed Bengali and still got nothing, so the place is not in
+            // OpenStreetMap under that name and no spelling will conjure it up.
+            // Telling them to try Bengali — which the other branch does — would
+            // be the app failing to read its own input, and would send them
+            // round in a circle.
+            //
+            // A map tap is the way through: it sets the point directly and
+            // routes normally, with no search in the path at all.
+            <span
+              style={{
+                fontFamily: '"Noto Sans Bengali", sans-serif',
+                lineHeight: 1.6,
+                display: 'block',
+              }}
+            >
+              &quot;{query}&quot; — এই নামে মানচিত্রে কিছু পাওয়া যায়নি। মানচিত্রে
+              জায়গাটির উপর ট্যাপ করে বেছে নিন, রুট ঠিকই বের হবে।
+            </span>
           ) : (
-            // A genuinely empty result set. "No places found" was usually a
-            // lie: the place exists, and OpenStreetMap simply stores a
-            // different English transliteration of it than the one typed —
-            // বরুয়া is filed as "Borua", so "Barua" matches nothing. The
-            // Bengali spelling is the one that is unambiguous, so ask for it.
+            // Latin input, no results. Usually a transliteration mismatch
+            // rather than a missing place: OpenStreetMap stores one English
+            // spelling per place, so বরুয়া is filed as "Borua" and "Barua"
+            // matches nothing. The Bengali spelling is the unambiguous one, so
+            // it is worth asking for — here, where it is actually useful.
             <span
               style={{
                 fontFamily: '"Noto Sans Bengali", sans-serif',
