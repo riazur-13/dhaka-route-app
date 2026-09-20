@@ -276,8 +276,65 @@ def geocode_cache(test_database):
     return GeocodeCache()
 
 
+class SearchCache:
+    """Read and write side helper for the place-search cache."""
+
+    def rows(self):
+        with database.db_cursor() as cursor:
+            cursor.execute("SELECT query, results FROM search_cache ORDER BY query")
+            return cursor.fetchall()
+
+    def count(self) -> int:
+        with database.db_cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM search_cache")
+            return cursor.fetchone()[0]
+
+    def results_for(self, query: str):
+        """What is stored for this query: None for a miss, and note that a
+        cached upstream failure is stored as SQL NULL, so it also reads None.
+        Use count() alongside to tell them apart."""
+        with database.db_cursor() as cursor:
+            cursor.execute(
+                "SELECT results FROM search_cache WHERE query = %s",
+                (database.normalise_query(query),),
+            )
+            row = cursor.fetchone()
+            return None if row is None else row[0]
+
+    def seconds_until_expiry(self, query: str) -> float:
+        with database.db_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT EXTRACT(EPOCH FROM (expires_at - NOW())) FROM search_cache
+                WHERE query = %s
+                """,
+                (database.normalise_query(query),),
+            )
+            return float(cursor.fetchone()[0])
+
+    def expire(self, query: str) -> None:
+        """Age an entry out, so TTL behaviour is testable without waiting."""
+        with database.db_cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE search_cache SET expires_at = NOW() - INTERVAL '1 second'
+                WHERE query = %s
+                """,
+                (database.normalise_query(query),),
+            )
+
+
 @pytest.fixture
-def client(fare_db, geocode_cache, groq_accepts):
+def search_cache(test_database):
+    """Empty the search cache, then hand back a reader for it."""
+    with database.db_cursor() as cursor:
+        cursor.execute("TRUNCATE search_cache")
+
+    return SearchCache()
+
+
+@pytest.fixture
+def client(fare_db, geocode_cache, search_cache, groq_accepts):
     from fastapi.testclient import TestClient
 
     with TestClient(main.app) as test_client:

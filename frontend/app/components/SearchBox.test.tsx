@@ -217,3 +217,130 @@ describe('an upstream failure outranks the script check', () => {
     expect(screen.queryByText(TRY_BENGALI)).toBeNull();
   });
 });
+
+describe('what reaches Nominatim', () => {
+  // Nominatim allows one request a second and has blocked this service once.
+  // These are the assertions that keep autocomplete on the right side of that.
+
+  beforeEach(() => {
+    searchPlace.mockResolvedValue({ ok: true, places: [] });
+  });
+
+  it('sends nothing below three characters', async () => {
+    const user = userEvent.setup();
+    renderBox();
+
+    await user.type(screen.getByRole('textbox'), 'Dh');
+
+    // Well past the 300ms debounce, so this is "never sent", not "not yet".
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(searchPlace).not.toHaveBeenCalled();
+  });
+
+  it('sends nothing below three characters of Bengali either', async () => {
+    const user = userEvent.setup();
+    renderBox();
+
+    await user.type(screen.getByRole('textbox'), 'ঢা');
+
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(searchPlace).not.toHaveBeenCalled();
+  });
+
+  it('sends once for a word typed at speed, not once per keystroke', async () => {
+    // delay: null types every character in one go, which is the worst case the
+    // debounce exists for: nine keystrokes, seven of them past the minimum.
+    const user = userEvent.setup({ delay: null });
+    renderBox();
+
+    await user.type(screen.getByRole('textbox'), 'Dhanmondi');
+    await waitFor(() => expect(searchPlace).toHaveBeenCalledTimes(1), {
+      timeout: 3000,
+    });
+
+    // And it stays one — nothing trailing arrives after the debounce settles.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(searchPlace).toHaveBeenCalledTimes(1);
+    expect(searchPlace.mock.calls[0][0]).toBe('Dhanmondi');
+  });
+
+  it('aborts the previous request when the query changes', async () => {
+    // Hold the first request open so there is something to cancel.
+    let release: (v: unknown) => void = () => {};
+    searchPlace.mockImplementationOnce(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+
+    const user = userEvent.setup({ delay: null });
+    renderBox();
+
+    await user.type(screen.getByRole('textbox'), 'Dhan');
+    await waitFor(() => expect(searchPlace).toHaveBeenCalledTimes(1), {
+      timeout: 3000,
+    });
+
+    const firstSignal = searchPlace.mock.calls[0][1] as AbortSignal;
+    expect(firstSignal).toBeInstanceOf(AbortSignal);
+    expect(firstSignal.aborted).toBe(false);
+
+    searchPlace.mockResolvedValue({ ok: true, places: [] });
+    await user.type(screen.getByRole('textbox'), 'mondi');
+
+    await waitFor(() => expect(firstSignal.aborted).toBe(true), { timeout: 3000 });
+    release(null);
+  });
+});
+
+describe('the dropdown while a search is in flight', () => {
+  it('shows a loading state rather than opening blank or late', async () => {
+    let release: (v: unknown) => void = () => {};
+    searchPlace.mockImplementationOnce(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+
+    const user = userEvent.setup({ delay: null });
+    renderBox();
+    await user.type(screen.getByRole('textbox'), 'Dhan');
+
+    // Visible immediately on the keystroke — before the debounce has even run,
+    // let alone the request. Asserted while searchPlace has still not been
+    // called at all, which is the whole point: the dropdown does not wait.
+    expect(await screen.findByRole('status')).toBeDefined();
+    expect(screen.getByText('খোঁজা হচ্ছে…')).toBeDefined();
+    expect(searchPlace).not.toHaveBeenCalled();
+
+    // Now let the debounce fire, so there is a real promise to release.
+    await waitFor(() => expect(searchPlace).toHaveBeenCalledTimes(1), {
+      timeout: 3000,
+    });
+    expect(await screen.findByRole('status')).toBeDefined();
+
+    release({ ok: true, places: [] });
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull(), {
+      timeout: 3000,
+    });
+  });
+
+  it('does not show the empty message while still searching', async () => {
+    let release: (v: unknown) => void = () => {};
+    searchPlace.mockImplementationOnce(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+
+    const user = userEvent.setup({ delay: null });
+    renderBox();
+    await user.type(screen.getByRole('textbox'), 'Barua');
+
+    await screen.findByRole('status');
+    await waitFor(() => expect(searchPlace).toHaveBeenCalledTimes(1), {
+      timeout: 3000,
+    });
+
+    // The message must wait for an answer. Showing it mid-flight would tell
+    // the user nothing was found while the search is still running.
+    expect(screen.queryByText(TRY_BENGALI)).toBeNull();
+
+    release({ ok: true, places: [] });
+    expect(await screen.findByText(TRY_BENGALI)).toBeDefined();
+  });
+});

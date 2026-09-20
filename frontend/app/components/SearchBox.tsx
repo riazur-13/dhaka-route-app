@@ -31,17 +31,55 @@ interface Props {
  */
 const CONTAINS_BENGALI = /[ঀ-৿]/;
 
+/**
+ * How long to wait after the last keystroke before asking upstream.
+ *
+ * Nominatim allows one request a second and has blocked this service's IP
+ * range once already, so this is not a polish setting — it is most of what
+ * makes search-as-you-type legal to point at them. At a normal typing speed of
+ * 150-250ms a character the gap never opens mid-word, so a nine-letter place
+ * name costs one request rather than seven.
+ */
+const DEBOUNCE_MS = 300;
+
+/**
+ * Shorter than this and nothing is sent at all.
+ *
+ * Two characters match half of Dhaka and spend a request finding that out.
+ * Three is the point where a query starts to mean something, in either script.
+ */
+const MIN_QUERY_LENGTH = 3;
+
 export default function SearchBox({ placeholder, onSelect, color, value = '', pending = false }: Props) {
   const [query, setQuery] = useState(value);
   const [results, setResults] = useState<SearchResult[]>([]);
-  const [loading, setLoading] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
+
+  // The query the current `results` actually answer.
+  //
+  // Loading is derived from this rather than stored, which is what lets the
+  // dropdown say "working" the instant a key is pressed. Setting a loading
+  // flag synchronously in the effect below would do the same thing and is what
+  // this component used to do, but React's lint rule rejects it for good
+  // reason: a setState in an effect body schedules a second render for
+  // something already knowable during the first.
+  const [resultsFor, setResultsFor] = useState<string | null>(null);
 
   // Why the last search came back empty. An empty list on its own cannot say:
   // "nothing matched" and "we could not ask" look identical from the results
   // array, and they need opposite advice.
   const [searchError, setSearchError] = useState<string | null>(null);
+
+  // One in-flight search at a time; the rest are aborted. Same pattern as the
+  // geocode and route controllers in map.tsx.
+  const searchAbort = useRef<AbortController | null>(null);
+
+  const longEnough = query.length >= MIN_QUERY_LENGTH;
+
+  // Known during render: the query is worth searching and the results on hand
+  // are for some older query, so an answer is still coming.
+  const loading = longEnough && resultsFor !== query;
 
   // Update input when parent sets a new value (e.g. from map click)
  const isExternalUpdate = useRef(false);
@@ -64,9 +102,13 @@ export default function SearchBox({ placeholder, onSelect, color, value = '', pe
 
     if (debounceRef.current) clearTimeout(debounceRef.current);
 
-    if (query.length < 2) {
+    if (!longEnough) {
       debounceRef.current = setTimeout(() => {
+        // Anything in flight is for a query the user has backspaced away from.
+        searchAbort.current?.abort();
+        searchAbort.current = null;
         setResults([]);
+        setResultsFor(null);
         setSearchError(null);
         setShowDropdown(false);
       }, 0);
@@ -74,18 +116,33 @@ export default function SearchBox({ placeholder, onSelect, color, value = '', pe
     }
 
     debounceRef.current = setTimeout(async () => {
-      setLoading(true);
-      const outcome = await searchPlace(query);
+      // One search in flight at a time. Without this, two requests started a
+      // keystroke apart can finish in the other order, and the older, shorter
+      // query's results end up on screen under the newer query's text.
+      searchAbort.current?.abort();
+      const controller = new AbortController();
+      searchAbort.current = controller;
+
+      const outcome = await searchPlace(query, controller.signal);
+
+      // Cancelled: a newer keystroke owns the dropdown and the error now, so
+      // this one touches neither — and says nothing, because the user typing
+      // again is not a failure. `loading` stays true on its own, since the
+      // newer query still has no results of its own yet.
+      if (outcome === null || searchAbort.current !== controller) return;
+
+      searchAbort.current = null;
       setResults(outcome.places);
       setSearchError(outcome.ok ? null : outcome.message ?? 'Place search is unavailable right now.');
-      setShowDropdown(true);
-      setLoading(false);
-    }, 400);
+      // Last, and it is what turns `loading` off: results now answer this
+      // exact query.
+      setResultsFor(query);
+    }, DEBOUNCE_MS);
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [query]);
+  }, [query, longEnough]);
 
   function handleSelect(result: SearchResult) {
     setQuery(result.name);
@@ -111,7 +168,14 @@ export default function SearchBox({ placeholder, onSelect, color, value = '', pe
           <input
             type="text"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              // Opened here rather than in the search effect, because this is
+              // a user event and that is where setState belongs. It also opens
+              // on the keystroke itself, so the dropdown is already showing
+              // its loading state before any request is even sent.
+              if (e.target.value.length >= MIN_QUERY_LENGTH) setShowDropdown(true);
+            }}
             placeholder={pending ? '' : placeholder}
             style={{
               width: '100%',
@@ -149,20 +213,52 @@ export default function SearchBox({ placeholder, onSelect, color, value = '', pe
           )}
         </div>
 
-        {loading && (
-          <div style={{
-            width: '14px',
-            height: '14px',
-            border: '2px solid #334155',
-            borderTop: `2px solid ${borderColor}`,
-            borderRadius: '50%',
-            animation: 'spin 0.8s linear infinite',
-            flexShrink: 0,
-          }} />
-        )}
       </div>
 
-      {showDropdown && results.length > 0 && (
+      {/* Loading lives in the dropdown, not beside the input, so the answer
+          appears where the user is already looking. It shows from the first
+          keystroke past the minimum — through the debounce and the request —
+          rather than the dropdown staying shut and then filling all at once. */}
+      {showDropdown && loading && (
+        <div
+          role="status"
+          style={{
+            position: 'absolute',
+            top: '100%',
+            left: '0',
+            right: '0',
+            marginTop: '4px',
+            background: '#1e293b',
+            border: '1px solid #334155',
+            borderRadius: '8px',
+            zIndex: 2000,
+            padding: '10px 12px',
+            fontSize: '13px',
+            color: '#64748b',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+          }}
+        >
+          <span
+            aria-hidden="true"
+            style={{
+              width: '12px',
+              height: '12px',
+              border: '2px solid #334155',
+              borderTop: `2px solid ${borderColor}`,
+              borderRadius: '50%',
+              animation: 'spin 0.8s linear infinite',
+              flexShrink: 0,
+            }}
+          />
+          <span style={{ fontFamily: '"Noto Sans Bengali", sans-serif' }}>
+            খোঁজা হচ্ছে…
+          </span>
+        </div>
+      )}
+
+      {showDropdown && !loading && results.length > 0 && (
         <div style={{
           position: 'absolute',
           top: '100%',
@@ -197,7 +293,11 @@ export default function SearchBox({ placeholder, onSelect, color, value = '', pe
         </div>
       )}
 
-      {showDropdown && results.length === 0 && !loading && query.length >= 2 && (
+      {/* Only after a search has actually completed and come back empty.
+          `loading` being derived from resultsFor is what guarantees that: it
+          stays true until results answer this exact query, so the message
+          cannot flash mid-type on stale results. */}
+      {showDropdown && !loading && results.length === 0 && longEnough && (
         <div style={{
           position: 'absolute',
           top: '100%',

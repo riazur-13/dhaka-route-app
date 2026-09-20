@@ -21,10 +21,13 @@ from fare_calculator import (
 from database import (
     cache_place_failure,
     cache_place_name,
+    cache_search_failure,
+    cache_search_results,
     close_pool,
     db_cursor,
     init_db,
     lookup_place_name,
+    lookup_search_results,
 )
 
 logger = logging.getLogger(__name__)
@@ -496,8 +499,35 @@ def get_average_fare(distance_km: float, route_type: str, vehicle_type: str = "p
     }
 
 
+SEARCH_UNAVAILABLE = "Place search is unavailable right now. Please try again in a moment."
+
+
 @app.get("/search")
 async def search_place(query: str):
+    # The cache is what makes search-as-you-type safe to point at Nominatim.
+    # They allow one request a second and have already blocked this service's
+    # IP range once; a request per debounced keystroke, times every user typing
+    # at once, walks straight back into that. Debouncing thins one person's
+    # keystrokes; this stops everyone after the first from asking at all.
+    #
+    # run_in_threadpool because psycopg is synchronous and this endpoint is
+    # not. Calling it directly would block the event loop for every other
+    # request in the process — the invariant test_endpoint_concurrency.py
+    # exists to hold.
+    cached = await run_in_threadpool(lookup_search_results, query)
+    if cached is not None:
+        # results is None for a cached upstream failure. Replaying the 502
+        # rather than retrying is the point: the provider said no minutes ago
+        # and asking again on every keystroke is what got us blocked.
+        if cached.results is None:
+            raise HTTPException(status_code=502, detail=SEARCH_UNAVAILABLE)
+        return {"results": cached.results}
+
+    # --- everything from here to the `results` list is provider-specific ---
+    # A move to Mapbox or LocationIQ replaces the URL, the params, and the
+    # field mapping below. Nothing else changes: the cache stores the parsed
+    # shape rather than the provider's body, so the table, the TTLs, the
+    # response contract and the whole frontend stay as they are.
     full_query = f"{query}, Dhaka, Bangladesh"
 
     url = "https://nominatim.openstreetmap.org/search"
@@ -511,19 +541,21 @@ async def search_place(query: str):
         "dedupe": 1,
     }
 
-    data = await fetch_upstream_json(
-        url, service="Nominatim place search", params=params
-    )
+    try:
+        data = await fetch_upstream_json(
+            url, service="Nominatim place search", params=params
+        )
+    except HTTPException:
+        await run_in_threadpool(cache_search_failure, query)
+        raise
 
     # A successful search is a JSON array. Nominatim reports its own errors as
     # an object instead, and iterating one of those yields its keys as strings —
     # which reached place["display_name"] and raised TypeError as a 500.
     if not isinstance(data, list):
         logger.warning("Nominatim place search returned %s, not a list", type(data).__name__)
-        raise HTTPException(
-            status_code=502,
-            detail="Place search is unavailable right now. Please try again in a moment.",
-        )
+        await run_in_threadpool(cache_search_failure, query)
+        raise HTTPException(status_code=502, detail=SEARCH_UNAVAILABLE)
 
     results = [
         {
@@ -534,6 +566,12 @@ async def search_place(query: str):
         }
         for place in data
     ]
+    # --- end provider-specific section ---
+
+    # Written even when empty. Zero matches is a real answer, and it is the
+    # entry worth having most: a spelling that matches nothing is the one
+    # people retype.
+    await run_in_threadpool(cache_search_results, query, results)
 
     return {"results": results}
 

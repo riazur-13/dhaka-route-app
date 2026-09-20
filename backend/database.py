@@ -15,7 +15,10 @@ main.py during the Render build to catch syntax errors, and that build step has 
 database credentials and no business talking to Neon.
 """
 
+import json
+import re
 import threading
+import unicodedata
 from contextlib import contextmanager
 from datetime import timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -187,6 +190,28 @@ def init_db() -> None:
             )
             """
         )
+        # The forward direction of the same idea, and the one that makes
+        # autocomplete legal to ship. Nominatim allows one request a second and
+        # has blocked this service's IP range once already; a search firing as
+        # the user types would walk straight back into that. Debouncing thins
+        # one user's keystrokes, and this stops every user after the first from
+        # asking again at all.
+        #
+        # results is JSONB rather than text because what is stored is already a
+        # list of objects, and a NULL means the *upstream* failed — see
+        # cache_search_failure. An empty list is a different thing entirely: a
+        # real answer that nothing matched. One nullable column carries that
+        # distinction, as with geocode_cache.name above, rather than a second
+        # flag column that could contradict it.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS search_cache (
+                query TEXT PRIMARY KEY,
+                results JSONB,
+                expires_at TIMESTAMPTZ NOT NULL
+            )
+            """
+        )
 
 
 # Roughly 11 metres at Dhaka's latitude — finer than anyone can aim a click, and
@@ -271,3 +296,112 @@ def cache_place_failure(lat: float, lng: float) -> None:
     a service that has already refused us five times.
     """
     _write_cache_entry(lat, lng, None, GEOCODE_FAILURE_TTL)
+
+
+# Runs of any whitespace collapse to one space, so "new  market" and
+# "new\tmarket" are the same cache key rather than two.
+_WHITESPACE_RUN = re.compile(r"\s+")
+
+
+def normalise_query(query: str) -> str:
+    """Reduce a typed query to its cache key.
+
+    The text counterpart of round_coordinate: both exist so that two inputs a
+    user would call identical land on one row instead of two.
+
+    NFC first, and that step is not decorative here. Bengali has more than one
+    valid codepoint sequence for the same visible text — a vowel sign can be
+    stored precomposed or as separate marks — so "ঢাকা" typed on two keyboards
+    can differ byte for byte while looking the same to the person who typed it.
+    Without normalising, each spelling would miss the other's cache entry and
+    send its own request upstream.
+
+    casefold rather than lower: lower() is written for English, casefold is the
+    Unicode-wide form and is what handles scripts we have not thought about.
+    """
+    return _WHITESPACE_RUN.sub(" ", unicodedata.normalize("NFC", query)).strip().casefold()
+
+
+class CachedSearch(NamedTuple):
+    """A cache hit for a search query.
+
+    Same shape of answer as CachedPlace: the lookup returns None for a miss and
+    one of these for a hit, where `results` being None is itself the finding —
+    the last attempt at this query failed upstream. An empty list means the
+    search ran and matched nothing, which is a different fact with a different
+    lifetime.
+    """
+
+    results: list[dict] | None
+
+
+def lookup_search_results(query: str) -> CachedSearch | None:
+    """Return the cached results for this query, or None if there are none.
+
+    Expiry is evaluated by Postgres against its own clock, the same clock the
+    writes stamp expires_at with, so a skewed application server cannot make an
+    entry immortal or stillborn.
+    """
+    with db_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT results FROM search_cache
+            WHERE query = %s AND expires_at > NOW()
+            """,
+            (normalise_query(query),),
+        )
+        row = cursor.fetchone()
+
+    return None if row is None else CachedSearch(results=row[0])
+
+
+def _write_search_entry(query: str, results: list[dict] | None, ttl: timedelta) -> None:
+    """Upsert one entry. The key is the normalised query, so re-writes replace."""
+    with db_cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO search_cache (query, results, expires_at)
+            VALUES (%s, %s, NOW() + %s)
+            ON CONFLICT (query) DO UPDATE
+            SET results = EXCLUDED.results, expires_at = EXCLUDED.expires_at
+            """,
+            # json.dumps because psycopg adapts a Python list to a Postgres
+            # array, not to JSONB, and these rows are objects rather than
+            # scalars. None stays None and lands as SQL NULL.
+            (
+                normalise_query(query),
+                json.dumps(results) if results is not None else None,
+                ttl,
+            ),
+        )
+
+
+def cache_search_results(query: str, results: list[dict]) -> None:
+    """Remember what a search returned, including when it returned nothing.
+
+    An empty list gets the same long lifetime as a full one, on purpose. Zero
+    matches is a real answer from a service that replied successfully, not an
+    outage — the same reasoning as caching Nominatim's "no address here" for
+    open water. And it is the most valuable entry of the lot: a spelling that
+    matches nothing is the one people retype, and without this each retype is
+    another wasted request to a service that has already said no.
+
+    The cost is staleness. A place added to OpenStreetMap tomorrow stays
+    invisible here for up to the success TTL. That trade is deliberate.
+    """
+    _write_search_entry(query, results, GEOCODE_SUCCESS_TTL)
+
+
+def cache_search_failure(query: str) -> None:
+    """Remember that the search provider could not answer at all.
+
+    The short TTL, mirroring cache_place_failure, because this says nothing
+    about the query and everything about the provider — it should stop applying
+    as soon as they are answering again.
+
+    Autocomplete is why this matters more here than on the reverse path. While
+    Nominatim is refusing us, every debounce from every user typing at once
+    would otherwise become a fresh doomed request, which is how the block
+    happened in the first place.
+    """
+    _write_search_entry(query, None, GEOCODE_FAILURE_TTL)

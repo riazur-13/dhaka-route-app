@@ -215,17 +215,28 @@ export interface SearchResults {
  * different messages: telling someone to try the Bengali spelling while the
  * service is down sends them chasing a problem that is not theirs.
  */
-export async function searchPlace(query: string): Promise<SearchResults> {
+export async function searchPlace(
+  query: string,
+  signal?: AbortSignal,
+): Promise<SearchResults | null> {
   const url = `${API_BASE}/search?query=${encodeURIComponent(query)}`;
   let res: Response;
 
   try {
-    res = await fetch(url);
-  } catch {
+    res = await fetch(url, { signal });
+  } catch (error) {
+    // Null means cancelled, never failed — see reverseGeocode. A newer
+    // keystroke owns the dropdown now, and the caller must touch nothing.
+    if (wasAborted(signal, error)) return null;
     return { ok: false, places: [], message: UNREACHABLE };
   }
 
   const data = await res.json().catch(() => null);
+
+  // The body can be cut off after the headers arrived; the parse guard above
+  // swallows that as a null body, and without this we would report a failure
+  // for a request nobody is waiting on.
+  if (signal?.aborted) return null;
 
   // Anything but a 200 has no `results` at all — the backend answers 502 with a
   // `detail` when Nominatim is blocked or down.
