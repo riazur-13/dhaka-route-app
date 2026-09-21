@@ -6,6 +6,7 @@ import {
   TileLayer,
   Marker,
   Polyline,
+  useMap,
   useMapEvents,
   Popup,
 } from "react-leaflet";
@@ -65,6 +66,78 @@ function ClickHandler({
       onMapClick(e.latlng.lat, e.latlng.lng);
     },
   });
+  return null;
+}
+
+/**
+ * Somewhere the map should be showing.
+ *
+ * `token` is what makes each request distinct. Selecting the same place twice,
+ * or routing the same trip again, has to move the map both times — without it
+ * the second would be the same object by value and the effect would sit still.
+ */
+type MapTargetRequest =
+  | { kind: "point"; lat: number; lng: number }
+  | { kind: "route"; coordinates: [number, number][] };
+
+type MapTarget = MapTargetRequest & { token: number };
+
+/** Breathing room on every side, in pixels, on top of any panel. */
+const MAP_FIT_MARGIN = 24;
+
+/**
+ * Street level. The place plus a few surrounding blocks, which is what lets
+ * someone orient themselves — 17 fills the screen with a single intersection
+ * and loses the context, 15 is neighbourhood scale and wastes the precision of
+ * the pin we just dropped.
+ */
+const MAP_FIT_MAX_ZOOM = 16;
+
+/**
+ * Moves the map, and is the only thing that does.
+ *
+ * A child of MapContainer so it can reach the map through useMap, the same way
+ * ClickHandler reaches it through useMapEvents. The alternative — a ref on
+ * MapContainer — would work but would not match how this file already talks to
+ * Leaflet.
+ *
+ * The effect depends on `target` alone. Nothing else in this component can
+ * cause the map to move, which is what stops a vehicle toggle or a fare
+ * refetch from yanking the viewport back after the user has panned away.
+ */
+function MapController({
+  target,
+  panelPadding,
+}: {
+  target: MapTarget | null;
+  panelPadding: () => {
+    paddingTopLeft: [number, number];
+    paddingBottomRight: [number, number];
+  };
+}) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (!target) return;
+
+    // A single point becomes a degenerate box. fitBounds handles that by
+    // zooming to maxZoom, which means one padding path serves both cases
+    // rather than flyTo needing its own idea of where the panels are.
+    const bounds =
+      target.kind === "point"
+        ? L.latLngBounds([[target.lat, target.lng], [target.lat, target.lng]])
+        : L.latLngBounds(target.coordinates);
+
+    map.fitBounds(bounds, {
+      ...panelPadding(),
+      maxZoom: MAP_FIT_MAX_ZOOM,
+    });
+    // panelPadding is read at call time on purpose and is not a dependency:
+    // it measures the DOM, so including it would re-fit whenever the panel
+    // resized rather than when the app actually has somewhere to show.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target, map]);
+
   return null;
 }
 
@@ -143,6 +216,55 @@ export default function Map() {
   // above there is only ever one of these, because the three requests it covers
   // are three parts of a single answer rather than two independent boxes.
   const routeAbort = useRef<AbortController | null>(null);
+
+  // Where the map should move next, set only by a search selection and by a
+  // route arriving. Everything else that changes on this screen — the vehicle
+  // toggle, the fare refetch, the AI text landing — leaves it alone, which is
+  // what lets a user pan somewhere and stay there.
+  const [mapTarget, setMapTarget] = useState<MapTarget | null>(null);
+  const mapTargetToken = useRef(0);
+
+  const searchPanelRef = useRef<HTMLDivElement>(null);
+  const infoPanelRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * How much of the map the panels are sitting on, right now.
+   *
+   * Measured rather than hardcoded. The panels are positioned in CSS pixels
+   * from the edges but their *size* depends on content and on the viewport —
+   * the info panel grows when the AI text arrives, and on a narrow phone the
+   * same panel covers a far larger share of the map. Constants tuned on a
+   * desktop would be wrong on exactly the device most people are holding.
+   *
+   * Reading `bottom` and `innerWidth - left` captures position and size
+   * together, so an absent panel, a taller panel and a narrower screen all
+   * fall out of the same two expressions with no branching.
+   *
+   * Leaflet can only pad edges, not describe an occupied rectangle. The search
+   * panel is centred at the top so its height is treated as blocking the whole
+   * top band; the info panel reaches the right edge so its width blocks the
+   * right column. That over-pads slightly near the corners, which is the right
+   * direction to be wrong in.
+   */
+  function panelPadding() {
+    const search = searchPanelRef.current?.getBoundingClientRect();
+    const info = infoPanelRef.current?.getBoundingClientRect();
+
+    const top = (search ? search.bottom : 0) + MAP_FIT_MARGIN;
+    const right =
+      (info ? Math.max(window.innerWidth - info.left, 0) : 0) + MAP_FIT_MARGIN;
+
+    return {
+      paddingTopLeft: [MAP_FIT_MARGIN, top] as [number, number],
+      paddingBottomRight: [right, MAP_FIT_MARGIN] as [number, number],
+    };
+  }
+
+  /** The only two places allowed to move the map. */
+  function showOnMap(target: MapTargetRequest) {
+    mapTargetToken.current += 1;
+    setMapTarget({ ...target, token: mapTargetToken.current });
+  }
 
   // True only while the two fare figures are being fetched. Distinct from
   // `loading`, which belongs to the route: the pill says "Finding route..." and
@@ -367,6 +489,11 @@ export default function Map() {
       // someone who has not said they took a pedal rickshaw. The effect below
       // picks them up once there is an answer.
       setRouteData(result.route);
+
+      // Trigger two. Fit the whole geometry rather than the two endpoints: a
+      // Dhaka route rarely runs straight between them, and a path that bulges
+      // around a river or a rail line falls outside the box its ends describe.
+      showOnMap({ kind: "route", coordinates: result.route.coordinates });
     } finally {
       // Only the call that still owns the screen may clear the pill. A
       // superseded one running its finally would switch "Finding route..." off
@@ -456,6 +583,11 @@ export default function Map() {
 
     setErrorMessage(null);
 
+    // Trigger one: the user picked a place, so show it to them. Before this
+    // the map never moved at all — the marker was dropped at coordinates that
+    // could be anywhere, including outside the viewport entirely.
+    showOnMap({ kind: "point", lat, lng });
+
     // Search already knows the name, so any reverse geocode still running for
     // this box is both redundant and a stale write waiting to happen. Cancel it
     // and drop the skeleton — otherwise it would sit on top of a name that is
@@ -524,7 +656,10 @@ export default function Map() {
   return (
     <div style={{ position: "relative", width: "100%", height: "100vh" }}>
       {/* ── Search Panel ── */}
+      {/* ref so the map fit can measure what this is covering, rather than
+          assuming a size that only holds on a desktop. */}
       <div
+        ref={searchPanelRef}
         style={{
           position: "absolute",
           top: "16px",
@@ -596,6 +731,7 @@ export default function Map() {
       {/* ── Info + Fare Panel ── */}
       {routeData && (
         <div
+          ref={infoPanelRef}
           style={{
             position: "absolute",
             top: "16px",
@@ -1028,6 +1164,7 @@ export default function Map() {
         />
 
         <ClickHandler onMapClick={handleMapClick} />
+        <MapController target={mapTarget} panelPadding={panelPadding} />
 
         {start && <Marker position={start} icon={startIcon} />}
         {end && <Marker position={end} icon={endIcon} />}
