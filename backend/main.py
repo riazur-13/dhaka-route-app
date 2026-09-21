@@ -98,6 +98,57 @@ async def fetch_upstream_json(
         raise HTTPException(status_code=502, detail=unavailable) from exc
 
 
+async def cache_read(fn, *args, what: str):
+    """Read from a cache, treating an unreachable cache as a miss.
+
+    A cache is an accelerator, not a source of truth. Both callers of this can
+    still get their answer upstream, so a database that will not respond should
+    cost the request some latency rather than the whole feature — which is what
+    it cost before this existed: a dropped Neon connection turned a perfectly
+    answerable /search into a 500.
+
+    Deliberately not applied to the fare endpoints. Those read the fare table
+    for the answer itself, and there is nothing to fall back to, so failing
+    loudly there is correct.
+
+    `except Exception` rather than `psycopg.Error`, and the breadth is the
+    point. psycopg_pool.PoolTimeout is not a psycopg.Error — it comes from the
+    pool package — so catching the obvious base class would miss the exact
+    failure a degraded Neon produces. The invariant is that nothing about the
+    cache may fail the request, and an invariant written as a list of exception
+    classes is one new class away from being false.
+
+    The cost is that a real bug in cache code is logged rather than raised;
+    exc_info keeps it loud in the log even though the caller never sees it.
+    """
+    try:
+        return await run_in_threadpool(fn, *args)
+    except Exception:
+        # Worth knowing about: while this is firing, every request goes
+        # upstream, which is the rate-limit exposure the cache exists to
+        # prevent. Degrading to "no cache" beats degrading to "no search", and
+        # the client-side debounce still holds, but it is not free.
+        logger.warning(
+            "%s cache read failed; falling through to upstream", what, exc_info=True
+        )
+        return None
+
+
+async def cache_write(fn, *args, what: str) -> None:
+    """Write to a cache, and carry on if it will not take the write.
+
+    By the time this runs the answer already exists — upstream has replied, or
+    has definitively refused. Failing here would discard a good result over a
+    bookkeeping problem.
+    """
+    try:
+        await run_in_threadpool(fn, *args)
+    except Exception:
+        logger.warning(
+            "%s cache write failed; the answer still stands", what, exc_info=True
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Deliberately not guarded by a try: if the schema cannot be created the
@@ -514,7 +565,7 @@ async def search_place(query: str):
     # not. Calling it directly would block the event loop for every other
     # request in the process — the invariant test_endpoint_concurrency.py
     # exists to hold.
-    cached = await run_in_threadpool(lookup_search_results, query)
+    cached = await cache_read(lookup_search_results, query, what="Place search")
     if cached is not None:
         # results is None for a cached upstream failure. Replaying the 502
         # rather than retrying is the point: the provider said no minutes ago
@@ -546,7 +597,7 @@ async def search_place(query: str):
             url, service="Nominatim place search", params=params
         )
     except HTTPException:
-        await run_in_threadpool(cache_search_failure, query)
+        await cache_write(cache_search_failure, query, what="Place search")
         raise
 
     # A successful search is a JSON array. Nominatim reports its own errors as
@@ -554,7 +605,7 @@ async def search_place(query: str):
     # which reached place["display_name"] and raised TypeError as a 500.
     if not isinstance(data, list):
         logger.warning("Nominatim place search returned %s, not a list", type(data).__name__)
-        await run_in_threadpool(cache_search_failure, query)
+        await cache_write(cache_search_failure, query, what="Place search")
         raise HTTPException(status_code=502, detail=SEARCH_UNAVAILABLE)
 
     results = [
@@ -571,7 +622,7 @@ async def search_place(query: str):
     # Written even when empty. Zero matches is a real answer, and it is the
     # entry worth having most: a spelling that matches nothing is the one
     # people retype.
-    await run_in_threadpool(cache_search_results, query, results)
+    await cache_write(cache_search_results, query, results, what="Place search")
 
     return {"results": results}
 
@@ -589,7 +640,7 @@ async def reverse_geocode(lat: float, lng: float):
     # called directly, each of these three round trips to Neon would block the
     # event loop, and with it every other request in the process. Same reasoning
     # as the note above /ai-fare-recommendation, arrived at from the other side.
-    cached = await run_in_threadpool(lookup_place_name, lat, lng)
+    cached = await cache_read(lookup_place_name, lat, lng, what="Reverse geocode")
     if cached is not None:
         # A cached None means the last attempt at this spot failed upstream.
         # Answering from that is the whole point: a user clicking a blocked
@@ -620,12 +671,12 @@ async def reverse_geocode(lat: float, lng: float):
             url, service="Nominatim reverse geocoding", params=params
         )
     except HTTPException:
-        await run_in_threadpool(cache_place_failure, lat, lng)
+        await cache_write(cache_place_failure, lat, lng, what="Reverse geocode")
         raise
 
     if not isinstance(data, dict):
         logger.warning("Nominatim reverse geocoding returned %s, not an object", type(data).__name__)
-        await run_in_threadpool(cache_place_failure, lat, lng)
+        await cache_write(cache_place_failure, lat, lng, what="Reverse geocode")
         raise HTTPException(status_code=502, detail=REVERSE_GEOCODE_UNAVAILABLE)
 
     if "error" in data:
@@ -644,7 +695,7 @@ async def reverse_geocode(lat: float, lng: float):
             data.get("display_name", coordinate_name)
         )
 
-    await run_in_threadpool(cache_place_name, lat, lng, name)
+    await cache_write(cache_place_name, lat, lng, name, what="Reverse geocode")
 
     return {"name": name}
 

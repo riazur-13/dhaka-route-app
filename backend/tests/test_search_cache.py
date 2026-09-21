@@ -14,6 +14,8 @@ answered with nothing".
 """
 
 import database
+import main
+import psycopg
 
 NOMINATIM_ANSWER = [
     {
@@ -239,3 +241,62 @@ class TestExpiry:
         search(client)
 
         assert search_cache.count() == 1
+
+
+class TestTheCacheIsAnOptimisationNotADependency:
+    """A cache that can take the feature down with it is not a cache.
+
+    Neon drops connections — it has done so repeatedly while this suite runs —
+    and Render's free tier sleeps. Search must survive that: the upstream call
+    is the source of truth and the cache only saves a trip to it.
+    """
+
+    def test_a_failed_cache_read_still_returns_nominatim_results(
+        self, client, upstream, monkeypatch
+    ):
+        """The question this class exists to answer."""
+        def unreachable(*args, **kwargs):
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+        monkeypatch.setattr(main, "lookup_search_results", unreachable)
+        upstream.replies(status_code=200, json=NOMINATIM_ANSWER)
+
+        response = search(client)
+
+        assert response.status_code == 200, (
+            "a dropped database connection took out search entirely"
+        )
+        assert response.json()["results"][0]["name"].startswith("Dhanmondi")
+        assert len(upstream.requests) == 1, "never even asked Nominatim"
+
+    def test_a_failed_cache_write_still_returns_results(
+        self, client, upstream, monkeypatch
+    ):
+        """The answer is already in hand; failing to file it must not lose it."""
+        def unreachable(*args, **kwargs):
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+        monkeypatch.setattr(main, "cache_search_results", unreachable)
+        upstream.replies(status_code=200, json=NOMINATIM_ANSWER)
+
+        response = search(client)
+
+        assert response.status_code == 200
+        assert response.json()["results"][0]["name"].startswith("Dhanmondi")
+
+    def test_a_failed_failure_write_still_reports_the_upstream_error(
+        self, client, upstream, monkeypatch
+    ):
+        """Two things broken at once must still give the caller the real reason."""
+        def unreachable(*args, **kwargs):
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+        monkeypatch.setattr(main, "cache_search_failure", unreachable)
+        upstream.replies(status_code=403, text="blocked")
+
+        response = search(client)
+
+        # 502 — Nominatim is the thing that failed. Not a 500 from the cache
+        # write that was only trying to remember it.
+        assert response.status_code == 502
+        assert isinstance(response.json()["detail"], str)
