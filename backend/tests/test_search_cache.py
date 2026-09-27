@@ -16,6 +16,7 @@ answered with nothing".
 import database
 import main
 import psycopg
+import pytest
 
 NOMINATIM_ANSWER = [
     {
@@ -300,3 +301,60 @@ class TestTheCacheIsAnOptimisationNotADependency:
         # write that was only trying to remember it.
         assert response.status_code == 502
         assert isinstance(response.json()["detail"], str)
+
+    def test_a_pool_timeout_is_caught_by_the_narrow_except(
+        self, client, upstream, monkeypatch
+    ):
+        """PoolTimeout specifically, because it is the one that actually happens.
+
+        The tests above raise OperationalError, so they would pass under a
+        catch-all just as well and cannot tell a narrow guard from a broad one.
+        This one pins the fact the guard depends on: psycopg_pool.PoolTimeout
+        subclasses psycopg.OperationalError, so `except psycopg.Error` covers
+        the pool as well as the driver.
+
+        That was asserted the other way round in an earlier version of this
+        code — the docstring claimed PoolTimeout was outside psycopg.Error and
+        used it to justify `except Exception`. It is not. If psycopg_pool ever
+        reparents these, this goes red rather than the guard quietly widening.
+        """
+        import psycopg_pool
+
+        assert issubclass(psycopg_pool.PoolTimeout, psycopg.Error), (
+            "psycopg_pool no longer derives from psycopg.Error; the narrow "
+            "except in cache_read/cache_write no longer covers the pool"
+        )
+
+        def pool_exhausted(*args, **kwargs):
+            raise psycopg_pool.PoolTimeout("couldn't get a connection after 10.00 sec")
+
+        monkeypatch.setattr(main, "lookup_search_results", pool_exhausted)
+        upstream.replies(status_code=200, json=NOMINATIM_ANSWER)
+
+        response = search(client)
+
+        assert response.status_code == 200
+        assert response.json()["results"][0]["name"].startswith("Dhanmondi")
+
+    def test_a_bug_in_cache_code_is_not_swallowed(self, client, upstream):
+        """The other half of narrowing, and the reason it is worth doing.
+
+        A TypeError from our own cache code is a defect, not the database being
+        unreachable. Under `except Exception` it would be logged and the
+        request would quietly succeed forever on the slow path, so the bug
+        would never surface. It must still reach the caller.
+        """
+        import database
+
+        def broken(*args, **kwargs):
+            raise TypeError("normalise_query() got an unexpected keyword")
+
+        upstream.replies(status_code=200, json=NOMINATIM_ANSWER)
+
+        original = database.lookup_search_results
+        main.lookup_search_results = broken
+        try:
+            with pytest.raises(TypeError):
+                search(client)
+        finally:
+            main.lookup_search_results = original

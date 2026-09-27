@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import httpx
 import json
 import logging
+import psycopg
 import threading
 import time
 from typing import Literal
@@ -111,19 +112,22 @@ async def cache_read(fn, *args, what: str):
     for the answer itself, and there is nothing to fall back to, so failing
     loudly there is correct.
 
-    `except Exception` rather than `psycopg.Error`, and the breadth is the
-    point. psycopg_pool.PoolTimeout is not a psycopg.Error — it comes from the
-    pool package — so catching the obvious base class would miss the exact
-    failure a degraded Neon produces. The invariant is that nothing about the
-    cache may fail the request, and an invariant written as a list of exception
-    classes is one new class away from being false.
+    `psycopg.Error` is the right net, and it is wider than it looks: the whole
+    psycopg_pool family derives from it. PoolTimeout — the failure a degraded
+    Neon actually produces — subclasses psycopg.OperationalError, as do
+    PoolClosed and TooManyRequests, so one base class covers the pool and the
+    driver together.
 
-    The cost is that a real bug in cache code is logged rather than raised;
-    exc_info keeps it loud in the log even though the caller never sees it.
+    This deliberately does not catch Exception. A TypeError or an AttributeError
+    from this module is a bug in our own cache code, not the database being
+    unreachable, and swallowing it would turn a defect into a permanent silent
+    slow path that still answers correctly. Those should reach the client and
+    be fixed. The narrow catch is what keeps "the cache is down" and "the cache
+    is broken" telling different stories.
     """
     try:
         return await run_in_threadpool(fn, *args)
-    except Exception:
+    except psycopg.Error:
         # Worth knowing about: while this is firing, every request goes
         # upstream, which is the rate-limit exposure the cache exists to
         # prevent. Degrading to "no cache" beats degrading to "no search", and
@@ -140,10 +144,13 @@ async def cache_write(fn, *args, what: str) -> None:
     By the time this runs the answer already exists — upstream has replied, or
     has definitively refused. Failing here would discard a good result over a
     bookkeeping problem.
+
+    Scoped to psycopg.Error for the same reason as cache_read: it covers the
+    pool errors as well as the driver's, and leaves our own bugs visible.
     """
     try:
         await run_in_threadpool(fn, *args)
-    except Exception:
+    except psycopg.Error:
         logger.warning(
             "%s cache write failed; the answer still stands", what, exc_info=True
         )
