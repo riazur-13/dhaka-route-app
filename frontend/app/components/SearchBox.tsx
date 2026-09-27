@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useEffectEvent, useId, useRef } from 'react';
 import { searchPlace } from '../lib/osrm';
 
 interface SearchResult {
@@ -81,17 +81,67 @@ export default function SearchBox({ placeholder, onSelect, color, value = '', pe
   // are for some older query, so an answer is still coming.
   const loading = longEnough && resultsFor !== query;
 
+  // Only results that answer the query as typed right now can be picked.
+  //
+  // Deliberately `resultsFor === query` rather than `!loading`. Below the
+  // minimum length `loading` is false, yet `results` still holds the previous
+  // query's list until the cleanup timeout clears it — so `!loading` alone
+  // would let Enter pick "Gul"'s first result for a box that now says "Gu".
+  const selectable = resultsFor === query ? results : [];
+  const listboxOpen = showDropdown && !loading && selectable.length > 0;
+
+  // The keyboard highlight, tagged with the query it was set for.
+  //
+  // Derived for the same reason `loading` is: a highlight set for an older
+  // query simply stops applying, so it resets on every query change — typing,
+  // or a map click arriving through `value` — without anything having to
+  // remember to reset it. Defaults to the first row, which makes what Enter
+  // will pick visible before it is pressed.
+  const [highlight, setHighlight] = useState({ query: '', index: 0 });
+  const activeIndex =
+    highlight.query === query
+      ? Math.min(highlight.index, Math.max(selectable.length - 1, 0))
+      : 0;
+
+  // Enter pressed while results were still on their way: the query it was
+  // pressed for. Resolved in the search callback, where the results land.
+  //
+  // Cleared whenever the query changes, not merely compared against it. Type
+  // "Gulshan", Enter, type "x", backspace — the query is "Gulshan" again, but
+  // the user abandoned that Enter by typing, and a compare-only rule would
+  // still fire it.
+  const pendingEnter = useRef<string | null>(null);
+
+  // Unique per instance: the start and destination boxes are both on the page,
+  // and aria-activedescendant has to point into the right one.
+  const listboxId = useId();
+  const optionId = (index: number) => `${listboxId}-option-${index}`;
+
   // Update input when parent sets a new value (e.g. from map click)
  const isExternalUpdate = useRef(false);
 
   // When parent updates value (map click), sync to query without triggering search
   useEffect(() => {
     if (value !== query) {
+      // A map click sets this box directly. It does not abort a search already
+      // in flight, so an Enter still waiting on one would otherwise overwrite
+      // the point the user has just tapped.
+      pendingEnter.current = null;
       isExternalUpdate.current = true;
       setTimeout(() => setQuery(value), 0);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
+
+  // The pick for an Enter that waited on a search, which lands after the render
+  // that started it. Calling handleSelect from that render would call the
+  // onSelect the parent passed back then, and map.tsx's handler reads the
+  // other endpoint from its own render: set the start by tapping the map while
+  // a destination Enter is pending, and the stale handler still sees no start,
+  // so no route is ever fetched. useEffectEvent always calls the latest one.
+  const selectWhenReady = useEffectEvent((result: SearchResult) => {
+    handleSelect(result);
+  });
 
   // Search effect — only triggers on user typing, not external updates
   useEffect(() => {
@@ -137,6 +187,15 @@ export default function SearchBox({ placeholder, onSelect, color, value = '', pe
       // Last, and it is what turns `loading` off: results now answer this
       // exact query.
       setResultsFor(query);
+
+      // An Enter pressed while this search was running. Resolved here because
+      // this closure is the one place that knows exactly which query these
+      // results answer — aborted and superseded requests have already
+      // returned above, so a "Gul" answer can never satisfy a "Gulshan" Enter.
+      if (pendingEnter.current === query) {
+        pendingEnter.current = null;
+        if (outcome.places.length > 0) selectWhenReady(outcome.places[0]);
+      }
     }, DEBOUNCE_MS);
 
     return () => {
@@ -145,9 +204,58 @@ export default function SearchBox({ placeholder, onSelect, color, value = '', pe
   }, [query, longEnough]);
 
   function handleSelect(result: SearchResult) {
+    pendingEnter.current = null;
     setQuery(result.name);
     setShowDropdown(false);
     onSelect(result.lat, result.lng, result.name);
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    // Mid-composition, Enter belongs to the keyboard, not to us. On many
+    // Bengali input methods it is what commits the word being built, so
+    // treating it as "pick" would select a suggestion for half-typed text.
+    // keyCode 229 covers Safari, which reports isComposing false on that Enter.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+
+    switch (e.key) {
+      case 'Enter':
+        // Picks from what is on screen rather than searching afresh: a new
+        // request could come back with a different top result from the one
+        // the user was looking at when they pressed it.
+        if (listboxOpen) {
+          e.preventDefault();
+          handleSelect(selectable[activeIndex]);
+        } else if (loading) {
+          // Not dropped: held until this query's results arrive.
+          e.preventDefault();
+          pendingEnter.current = query;
+        }
+        // No results: nothing to pick, and the empty-result message already
+        // says why.
+        return;
+
+      case 'ArrowDown':
+      case 'ArrowUp': {
+        if (selectable.length === 0) return;
+        e.preventDefault();
+        if (!showDropdown) {
+          setShowDropdown(true);
+          return;
+        }
+        const step = e.key === 'ArrowDown' ? 1 : -1;
+        // Clamped rather than wrapping: holding Down stops at the last row
+        // instead of jumping back to the first.
+        const index = Math.min(Math.max(activeIndex + step, 0), selectable.length - 1);
+        setHighlight({ query, index });
+        return;
+      }
+
+      case 'Escape':
+        if (showDropdown || pendingEnter.current !== null) e.preventDefault();
+        pendingEnter.current = null;
+        setShowDropdown(false);
+        return;
+    }
   }
 
   const borderColor = color === 'green' ? '#22c55e' : '#f59e0b';
@@ -167,8 +275,20 @@ export default function SearchBox({ placeholder, onSelect, color, value = '', pe
         <div style={{ position: 'relative', flex: 1, display: 'flex' }}>
           <input
             type="text"
+            role="combobox"
+            // The placeholder is blanked while a name is pending, which would
+            // otherwise leave the combobox with no accessible name at all.
+            aria-label={placeholder}
+            aria-autocomplete="list"
+            aria-expanded={listboxOpen}
+            aria-controls={listboxId}
+            aria-activedescendant={listboxOpen ? optionId(activeIndex) : undefined}
+            // Phone keyboards show a search key instead of a return arrow.
+            enterKeyHint="search"
             value={query}
+            onKeyDown={handleKeyDown}
             onChange={(e) => {
+              pendingEnter.current = null;
               setQuery(e.target.value);
               // Opened here rather than in the search effect, because this is
               // a user event and that is where setState belongs. It also opens
@@ -258,8 +378,11 @@ export default function SearchBox({ placeholder, onSelect, color, value = '', pe
         </div>
       )}
 
-      {showDropdown && !loading && results.length > 0 && (
-        <div style={{
+      {listboxOpen && (
+        <div
+          id={listboxId}
+          role="listbox"
+          style={{
           position: 'absolute',
           top: '100%',
           left: '0',
@@ -272,19 +395,24 @@ export default function SearchBox({ placeholder, onSelect, color, value = '', pe
           overflow: 'hidden',
           boxShadow: '0 4px 20px rgba(0,0,0,0.5)',
         }}>
-          {results.map((result, index) => (
+          {selectable.map((result, index) => (
             <div
               key={index}
+              id={optionId(index)}
+              role="option"
+              aria-selected={index === activeIndex}
               onMouseDown={() => handleSelect(result)}
+              // Hover moves the same highlight the arrow keys do. Two separate
+              // highlights could light two rows while Enter picks only one.
+              onMouseEnter={() => setHighlight({ query, index })}
               style={{
                 padding: '10px 12px',
                 cursor: 'pointer',
-                borderBottom: index < results.length - 1 ? '1px solid #334155' : 'none',
+                borderBottom: index < selectable.length - 1 ? '1px solid #334155' : 'none',
                 fontSize: '13px',
                 color: 'white',
+                background: index === activeIndex ? '#334155' : 'transparent',
               }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = '#334155')}
-              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
             >
               <p style={{ fontWeight: 600, marginBottom: '2px' }}>{result.name}</p>
               <p style={{ color: '#94a3b8', fontSize: '11px' }}>{result.full_name}</p>

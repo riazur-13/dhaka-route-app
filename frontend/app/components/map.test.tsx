@@ -308,7 +308,7 @@ describe('moving the map', () => {
     const user = userEvent.setup();
     render(<Map />);
 
-    await user.type(screen.getAllByRole('textbox')[0], 'Borua');
+    await user.type(screen.getByRole('combobox', { name: /^From/ }), 'Borua');
     await user.click(await screen.findByText('Borua'));
 
     await waitFor(() => expect(fitBounds).toHaveBeenCalled());

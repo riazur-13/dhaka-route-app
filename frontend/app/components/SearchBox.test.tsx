@@ -12,7 +12,7 @@
  * array cannot tell them apart on its own.
  */
 
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -39,12 +39,12 @@ function renderBox() {
   );
 }
 
-/** Type enough to clear the 2-character minimum and trip the 400 ms debounce. */
+/** Type enough to clear the 3-character minimum and trip the 300 ms debounce. */
 async function search(
   user: ReturnType<typeof userEvent.setup>,
   query: string = QUERY,
 ) {
-  await user.type(screen.getByRole('textbox'), query);
+  await user.type(screen.getByRole('combobox'), query);
   await waitFor(() => expect(searchPlace).toHaveBeenCalled(), { timeout: 3000 });
 }
 
@@ -230,7 +230,7 @@ describe('what reaches Nominatim', () => {
     const user = userEvent.setup();
     renderBox();
 
-    await user.type(screen.getByRole('textbox'), 'Dh');
+    await user.type(screen.getByRole('combobox'), 'Dh');
 
     // Well past the 300ms debounce, so this is "never sent", not "not yet".
     await new Promise((resolve) => setTimeout(resolve, 600));
@@ -241,7 +241,7 @@ describe('what reaches Nominatim', () => {
     const user = userEvent.setup();
     renderBox();
 
-    await user.type(screen.getByRole('textbox'), 'ঢা');
+    await user.type(screen.getByRole('combobox'), 'ঢা');
 
     await new Promise((resolve) => setTimeout(resolve, 600));
     expect(searchPlace).not.toHaveBeenCalled();
@@ -253,7 +253,7 @@ describe('what reaches Nominatim', () => {
     const user = userEvent.setup({ delay: null });
     renderBox();
 
-    await user.type(screen.getByRole('textbox'), 'Dhanmondi');
+    await user.type(screen.getByRole('combobox'), 'Dhanmondi');
     await waitFor(() => expect(searchPlace).toHaveBeenCalledTimes(1), {
       timeout: 3000,
     });
@@ -274,7 +274,7 @@ describe('what reaches Nominatim', () => {
     const user = userEvent.setup({ delay: null });
     renderBox();
 
-    await user.type(screen.getByRole('textbox'), 'Dhan');
+    await user.type(screen.getByRole('combobox'), 'Dhan');
     await waitFor(() => expect(searchPlace).toHaveBeenCalledTimes(1), {
       timeout: 3000,
     });
@@ -284,7 +284,7 @@ describe('what reaches Nominatim', () => {
     expect(firstSignal.aborted).toBe(false);
 
     searchPlace.mockResolvedValue({ ok: true, places: [] });
-    await user.type(screen.getByRole('textbox'), 'mondi');
+    await user.type(screen.getByRole('combobox'), 'mondi');
 
     await waitFor(() => expect(firstSignal.aborted).toBe(true), { timeout: 3000 });
     release(null);
@@ -300,7 +300,7 @@ describe('the dropdown while a search is in flight', () => {
 
     const user = userEvent.setup({ delay: null });
     renderBox();
-    await user.type(screen.getByRole('textbox'), 'Dhan');
+    await user.type(screen.getByRole('combobox'), 'Dhan');
 
     // Visible immediately on the keystroke — before the debounce has even run,
     // let alone the request. Asserted while searchPlace has still not been
@@ -329,7 +329,7 @@ describe('the dropdown while a search is in flight', () => {
 
     const user = userEvent.setup({ delay: null });
     renderBox();
-    await user.type(screen.getByRole('textbox'), 'Barua');
+    await user.type(screen.getByRole('combobox'), 'Barua');
 
     await screen.findByRole('status');
     await waitFor(() => expect(searchPlace).toHaveBeenCalledTimes(1), {
@@ -342,5 +342,279 @@ describe('the dropdown while a search is in flight', () => {
 
     release({ ok: true, places: [] });
     expect(await screen.findByText(TRY_BENGALI)).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The keyboard.
+//
+// Enter is the reflex. Someone types "Gulshan", presses Enter, sees nothing
+// happen and concludes the app is broken — and on a phone the dropdown can sit
+// behind the keyboard, which makes Enter the comfortable path, not a shortcut.
+// ---------------------------------------------------------------------------
+
+const GULSHAN_PLACES = [
+  { name: 'Gulshan 1', full_name: 'Gulshan 1, Dhaka', lat: 23.78, lng: 90.416 },
+  { name: 'Gulshan 2', full_name: 'Gulshan 2, Dhaka', lat: 23.794, lng: 90.414 },
+  { name: 'Gulshan Lake', full_name: 'Gulshan Lake, Dhaka', lat: 23.788, lng: 90.42 },
+];
+
+const GUL_PLACES = [
+  { name: 'Gulistan', full_name: 'Gulistan, Dhaka', lat: 23.723, lng: 90.412 },
+];
+
+/** A search that stays in flight until the test says otherwise. */
+function holdNextSearch() {
+  let release: (v: unknown) => void = () => {};
+  searchPlace.mockImplementationOnce(
+    () => new Promise((resolve) => { release = resolve; }),
+  );
+  return (v: unknown) => release(v);
+}
+
+/** Long enough past the debounce that "not called" means never, not not-yet. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 600));
+
+function renderPicker() {
+  const onSelect = vi.fn();
+  render(<SearchBox placeholder="From" color="green" onSelect={onSelect} />);
+  return { onSelect, box: screen.getByRole('combobox') };
+}
+
+describe('Enter picks from the dropdown', () => {
+  beforeEach(() => {
+    // The default for any search a test does not set up — including the one
+    // that fires for the picked name after a selection.
+    searchPlace.mockResolvedValue({ ok: true, places: GULSHAN_PLACES });
+  });
+
+  it('selects the first result when results are showing', async () => {
+    const user = userEvent.setup({ delay: null });
+    const { onSelect, box } = renderPicker();
+
+    await user.type(box, 'Gulshan');
+    await screen.findByRole('listbox');
+    const searchesBefore = searchPlace.mock.calls.length;
+    await user.keyboard('{Enter}');
+
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect).toHaveBeenCalledWith(23.78, 90.416, 'Gulshan 1');
+    // Picked from what was on screen: no fresh request stood between the
+    // keypress and the pick, so the top result cannot have changed under it.
+    expect(searchPlace.mock.calls.length).toBe(searchesBefore);
+  });
+
+  it('selects the second result after ArrowDown', async () => {
+    const user = userEvent.setup({ delay: null });
+    const { onSelect, box } = renderPicker();
+
+    await user.type(box, 'Gulshan');
+    await screen.findByRole('listbox');
+    await user.keyboard('{ArrowDown}{Enter}');
+
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect).toHaveBeenCalledWith(23.794, 90.414, 'Gulshan 2');
+  });
+
+  it('points aria-activedescendant at the highlighted option', async () => {
+    const user = userEvent.setup({ delay: null });
+    const { box } = renderPicker();
+
+    await user.type(box, 'Gulshan');
+    await screen.findByRole('listbox');
+
+    const options = screen.getAllByRole('option');
+    expect(box.getAttribute('aria-expanded')).toBe('true');
+    expect(box.getAttribute('aria-activedescendant')).toBe(options[0].id);
+    expect(options[0].getAttribute('aria-selected')).toBe('true');
+
+    await user.keyboard('{ArrowDown}');
+
+    expect(box.getAttribute('aria-activedescendant')).toBe(options[1].id);
+    expect(options[1].getAttribute('aria-selected')).toBe('true');
+    expect(options[0].getAttribute('aria-selected')).toBe('false');
+  });
+
+  it('waits for results when pressed while loading, then selects the first', async () => {
+    const release = holdNextSearch();
+    const user = userEvent.setup({ delay: null });
+    const { onSelect, box } = renderPicker();
+
+    await user.type(box, 'Gulshan');
+    await user.keyboard('{Enter}');
+
+    // Still in flight: nothing to pick yet, and the keypress is not lost.
+    await waitFor(() => expect(searchPlace).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    expect(onSelect).not.toHaveBeenCalled();
+
+    release({ ok: true, places: GULSHAN_PLACES });
+
+    await waitFor(() => expect(onSelect).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    expect(onSelect).toHaveBeenCalledWith(23.78, 90.416, 'Gulshan 1');
+  });
+
+  it('does not select a result belonging to a previous query', async () => {
+    // The stale-result trap. "Gul" results are on screen, the user types
+    // "shan" and presses Enter before "Gulshan" results land. Gulistan is the
+    // first thing visible and the wrong place entirely.
+    searchPlace.mockResolvedValueOnce({ ok: true, places: GUL_PLACES });
+    const user = userEvent.setup({ delay: null });
+    const { onSelect, box } = renderPicker();
+
+    await user.type(box, 'Gul');
+    expect(await screen.findByText('Gulistan')).toBeDefined();
+
+    const release = holdNextSearch();
+    await user.type(box, 'shan');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => expect(searchPlace).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    expect(onSelect).not.toHaveBeenCalled();
+
+    // And the Enter was not dropped: it resolves against the right query.
+    release({ ok: true, places: GULSHAN_PLACES });
+    await waitFor(() => expect(onSelect).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    expect(onSelect).toHaveBeenCalledWith(23.78, 90.416, 'Gulshan 1');
+    expect(onSelect).not.toHaveBeenCalledWith(23.723, 90.412, 'Gulistan');
+  });
+
+  it('does not pick the old list after backspacing below the minimum', async () => {
+    // The narrower half of the stale-result trap. Under three characters
+    // nothing is loading, yet the previous list is still in state until the
+    // cleanup runs — so "not loading" is not the same as "these results are
+    // for what is typed".
+    searchPlace.mockResolvedValueOnce({ ok: true, places: GUL_PLACES });
+    const user = userEvent.setup({ delay: null });
+    const { onSelect, box } = renderPicker();
+
+    await user.type(box, 'Gul');
+    expect(await screen.findByText('Gulistan')).toBeDefined();
+
+    await user.type(box, '{Backspace}{Enter}');
+    await settle();
+
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('a waiting Enter calls the onSelect the parent passes now, not then', async () => {
+    // The pick lands after the render that started it. map.tsx's handler reads
+    // the other endpoint from its own render, so calling the old one would
+    // route from a start point that has since changed — or not route at all.
+    const release = holdNextSearch();
+    const user = userEvent.setup({ delay: null });
+    const before = vi.fn();
+    const after = vi.fn();
+    const { rerender } = render(
+      <SearchBox placeholder="To" color="amber" onSelect={before} />,
+    );
+
+    await user.type(screen.getByRole('combobox'), 'Gulshan');
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(searchPlace).toHaveBeenCalledTimes(1), { timeout: 3000 });
+
+    // Meanwhile the parent re-renders — say the user tapped a start point.
+    rerender(<SearchBox placeholder="To" color="amber" onSelect={after} />);
+    release({ ok: true, places: GULSHAN_PLACES });
+
+    await waitFor(() => expect(after).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    expect(before).not.toHaveBeenCalled();
+  });
+
+  it('forgets a waiting Enter once the user types again', async () => {
+    // Type "Gulshan", Enter, type "x", backspace. The query reads "Gulshan"
+    // again, but typing after Enter abandoned it — a rule that only compared
+    // queries would still fire the pick when the new results landed.
+    const release = holdNextSearch();
+    const user = userEvent.setup({ delay: null });
+    const { onSelect, box } = renderPicker();
+
+    await user.type(box, 'Gulshan');
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(searchPlace).toHaveBeenCalledTimes(1), { timeout: 3000 });
+
+    await user.type(box, 'x{Backspace}');
+    release(null); // the first request, now aborted
+
+    await waitFor(() => expect(searchPlace).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    expect(await screen.findByRole('listbox')).toBeDefined();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('selects nothing when there are no results', async () => {
+    searchPlace.mockResolvedValue({ ok: true, places: [] });
+    const user = userEvent.setup({ delay: null });
+    const { onSelect, box } = renderPicker();
+
+    await user.type(box, 'Barua');
+    await screen.findByText(TRY_BENGALI);
+    await user.keyboard('{Enter}');
+    await settle();
+
+    expect(onSelect).not.toHaveBeenCalled();
+    // The explanation stays where it was.
+    expect(screen.getByText(TRY_BENGALI)).toBeDefined();
+  });
+
+  it('is ignored while a Bengali word is still being composed', async () => {
+    // On many Bengali keyboards Enter is what commits the word being built.
+    // Treating that as a pick would choose a suggestion for half-typed text.
+    const user = userEvent.setup({ delay: null });
+    const { onSelect, box } = renderPicker();
+
+    await user.type(box, 'Gulshan');
+    await screen.findByRole('listbox');
+
+    fireEvent.keyDown(box, { key: 'Enter', isComposing: true });
+    fireEvent.keyDown(box, { key: 'Enter', keyCode: 229 });
+    expect(onSelect).not.toHaveBeenCalled();
+
+    // Not a vacuous pass: the same list, the same key, outside composition.
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(onSelect).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Escape', () => {
+  it('closes the dropdown', async () => {
+    searchPlace.mockResolvedValue({ ok: true, places: GULSHAN_PLACES });
+    const user = userEvent.setup({ delay: null });
+    const { onSelect, box } = renderPicker();
+
+    await user.type(box, 'Gulshan');
+    await screen.findByRole('listbox');
+
+    await user.keyboard('{Escape}');
+
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(box.getAttribute('aria-expanded')).toBe('false');
+    expect(box.getAttribute('aria-activedescendant')).toBeNull();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+});
+
+describe('start and destination together', () => {
+  it('each box answers Enter for itself', async () => {
+    searchPlace.mockResolvedValue({ ok: true, places: GULSHAN_PLACES });
+    const fromSelect = vi.fn();
+    const toSelect = vi.fn();
+    render(
+      <>
+        <SearchBox placeholder="From" color="green" onSelect={fromSelect} />
+        <SearchBox placeholder="To" color="amber" onSelect={toSelect} />
+      </>,
+    );
+    const from = screen.getByRole('combobox', { name: 'From' });
+    const to = screen.getByRole('combobox', { name: 'To' });
+
+    // aria-activedescendant has to point into the right list.
+    expect(from.getAttribute('aria-controls')).not.toBe(to.getAttribute('aria-controls'));
+
+    const user = userEvent.setup({ delay: null });
+    await user.type(to, 'Gulshan');
+    await screen.findByRole('listbox');
+    await user.keyboard('{ArrowDown}{Enter}');
+
+    expect(toSelect).toHaveBeenCalledWith(23.794, 90.414, 'Gulshan 2');
+    expect(fromSelect).not.toHaveBeenCalled();
   });
 });
