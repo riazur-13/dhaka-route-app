@@ -196,8 +196,9 @@ class TestTheAverageIsScopedToOneVehicle:
         body = average(client, "pedal").json()
 
         assert body["submission_count"] == 2
-        # Exactly 95 in the table; 100 on screen, rounded to the nearest ten.
-        assert body["average_fare"] == 100
+        # 95 in the table and 95 on screen. The average is not rounded to tens
+        # the way the recommendation band is — see floor_fare_to_taka.
+        assert body["average_fare"] == 95
 
     def test_the_battery_average_ignores_pedal_rows(self, client, fare_db):
         for _ in range(2):
@@ -211,13 +212,13 @@ class TestTheAverageIsScopedToOneVehicle:
         assert body["average_fare"] == 60.0
 
     def test_the_two_averages_differ(self, client, fare_db):
-        """Mixed, both would read 71.67 and describe neither vehicle."""
+        """Mixed, both would read 71 and describe neither vehicle."""
         for _ in range(2):
             submit(client, PEDAL_FARE)
         for _ in range(4):
             submit(client, BATTERY_FARE)
 
-        assert average(client, "pedal").json()["average_fare"] == 100
+        assert average(client, "pedal").json()["average_fare"] == 95
         assert average(client, "battery").json()["average_fare"] == 60.0
 
     def test_omitting_the_parameter_reads_the_pedal_average(self, client, fare_db):

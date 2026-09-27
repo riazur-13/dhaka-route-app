@@ -16,8 +16,8 @@ from config import BOUNDS_WIDENING_FACTOR, GROQ_API_KEY, GROQ_MODEL, USER_AGENT
 from fare_calculator import (
     VehicleType,
     calculate_fare,
+    floor_fare_to_taka,
     round_fare_for_display,
-    round_fare_nearest,
 )
 from database import (
     cache_place_failure,
@@ -548,11 +548,12 @@ def get_average_fare(distance_km: float, route_type: str, vehicle_type: str = "p
         avg_fare, count = cursor.fetchone() or (None, 0)
 
     return {
-        # Rounded for display only; the stored submissions keep full precision.
-        # Nearest rather than up or down, because an average describes what
-        # people paid rather than bounding what they should — neither direction
-        # protects anything here, so the least distorting rule wins.
-        "average_fare": round_fare_nearest(avg_fare) if avg_fare else None,
+        # Whole taka, not tens like the recommendation beside it on the panel:
+        # the recommendation is advice, this is evidence of what people paid,
+        # and rounding it to tens hid every submission that moved it by less
+        # than ten. Display only; the stored submissions keep full precision.
+        # The full reasoning is on floor_fare_to_taka.
+        "average_fare": floor_fare_to_taka(avg_fare) if avg_fare else None,
         "submission_count": count,
     }
 

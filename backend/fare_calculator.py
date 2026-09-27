@@ -231,11 +231,25 @@ def round_fare_for_display(
     return floored_low, max(floored_high, floored_low)
 
 
-def round_fare_nearest(value: float) -> int:
-    """Round a standalone figure to the nearest display step.
+def floor_fare_to_taka(value: float) -> int:
+    """Floor a crowdsourced average to whole taka, for the screen.
 
-    For the crowdsourced average, which is a description of what people paid
-    rather than a bound on what they should pay. Neither direction protects
-    anything here, so the least distorting rule is the right one.
+    Sits next to round_fare_for_display deliberately, because the two land side
+    by side in the panel and the obvious next question is why they disagree.
+
+    The recommendation is advice. It rounds to tens because ৳120 is a number you
+    say to a rickshaw puller and ৳117 is not.
+
+    This is evidence. It is what people actually paid, and rounding it to tens
+    does not make it easier to use — it makes it less true, and it hides the
+    only signal a contributor gets. Six submissions would move the trip count
+    while "৳50" sat unchanged, which reads as the submissions not counting.
+
+    Down rather than to nearest, the same direction as the recommendation band:
+    a figure shown to a passenger does not overstate what drivers are paid.
+    The labour floor is the deliberate exception and rounds up — see
+    calculate_floor — but that is a protection, and this protects nothing, so
+    there is no reason for it to round anywhere but down. Display only: the
+    table keeps the exact values.
     """
-    return int(math.floor(value / FARE_DISPLAY_STEP + 0.5)) * FARE_DISPLAY_STEP
+    return math.floor(value)

@@ -182,8 +182,13 @@ class TestDisplayRounding:
     def test_the_average_is_rounded_for_display_but_stored_exactly(
         self, client, fare_db
     ):
-        """Lossy in the panel, exact in the table."""
-        for amount in (95.0, 97.0, 99.0):
+        """Lossy in the panel, exact in the table.
+
+        The amounts have a fractional mean on purpose. Three whole numbers
+        averaging to a whole number would pass this test while demonstrating
+        nothing, since flooring a whole number is a no-op.
+        """
+        for amount in (95.0, 97.5, 99.0):
             assert submit(client, 3.0, amount, "pedal").status_code == 200
 
         body = client.get(
@@ -191,11 +196,49 @@ class TestDisplayRounding:
             params={"distance_km": 3.0, "route_type": "rickshaw", "vehicle_type": "pedal"},
         ).json()
 
-        # Mean of 95, 97, 99 is exactly 97 — displayed as 100.
-        assert body["average_fare"] == 100
+        # Mean of 95, 97.5, 99 is 97.1666… — floored to 97 for the screen.
+        assert body["average_fare"] == 97
 
         stored = fare_db.query("SELECT fare_amount FROM fare_submissions ORDER BY fare_amount")
-        assert [row[0] for row in stored] == [95.0, 97.0, 99.0]
+        assert [row[0] for row in stored] == [95.0, 97.5, 99.0]
+
+    def test_a_submission_that_moves_the_average_moves_the_figure(
+        self, client, fare_db
+    ):
+        """The reported symptom, and the reason the average stopped rounding.
+
+        Submitting fares made the trip count climb while the figure sat still,
+        because rounding to tens swallowed anything smaller than ten taka. That
+        reads as the submissions not counting — and the figure is the only
+        feedback a contributor gets that theirs landed.
+
+        Under the old rule both readings below were 50.
+        """
+        for _ in range(2):
+            assert submit(client, 3.0, 50.0, "pedal").status_code == 200
+
+        def shown():
+            return client.get(
+                "/fares/average",
+                params={
+                    "distance_km": 3.0,
+                    "route_type": "rickshaw",
+                    "vehicle_type": "pedal",
+                },
+            ).json()
+
+        before = shown()
+        assert before["average_fare"] == 50
+        assert before["submission_count"] == 2
+
+        for _ in range(4):
+            assert submit(client, 3.0, 55.0, "pedal").status_code == 200
+
+        after = shown()
+        # True mean is 53.33…, a move of more than a taka, so it has to show.
+        assert after["submission_count"] == 6
+        assert after["average_fare"] == 53
+        assert after["average_fare"] != before["average_fare"]
 
 
 class TestThePromptAndTheFieldsAgree:

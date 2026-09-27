@@ -21,7 +21,7 @@ from fare_calculator import (
     calculate_floor,
     calculate_rules_fare,
     round_fare_for_display,
-    round_fare_nearest,
+    floor_fare_to_taka,
 )
 
 
@@ -306,8 +306,22 @@ class TestDisplayRounding:
         assert round_fare_for_display(31, 42, 0.7, "battery") == (40, 50)
         assert calculate_floor(0.7, "battery") == 31
 
-    def test_the_average_rounds_to_nearest_not_down(self):
-        """A standalone figure, not a bound — neither direction protects it."""
-        assert round_fare_nearest(95.0) == 100
-        assert round_fare_nearest(94.0) == 90
-        assert round_fare_nearest(60.0) == 60
+    def test_the_average_keeps_whole_taka(self):
+        """The average is evidence, so it is not rounded to tens like the band.
+
+        95 displayed as 100 is the behaviour this replaced: it overstated what
+        people paid, and it swallowed every change smaller than ten taka.
+        """
+        assert floor_fare_to_taka(95.0) == 95
+        assert floor_fare_to_taka(51.2) == 51
+        assert floor_fare_to_taka(60.0) == 60
+
+    def test_the_average_never_rounds_up(self):
+        """The assertion that pins the direction.
+
+        51.7 is the case that separates flooring from rounding to nearest; the
+        rest of this class's figures pass under either rule. Down, matching
+        the recommendation band in round_fare_for_display.
+        """
+        assert floor_fare_to_taka(51.7) == 51
+        assert floor_fare_to_taka(99.99) == 99
