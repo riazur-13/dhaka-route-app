@@ -562,3 +562,79 @@ describe('a point from search', () => {
     expect(screen.queryByText(TAP_INSIDE)).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// The help card, in the corner the legend used to hold.
+// ---------------------------------------------------------------------------
+
+const HELP_HEADING = 'কীভাবে ব্যবহার করবেন';
+
+function helpButton() {
+  return screen.getByRole('button', { name: '? সাহায্য' });
+}
+
+describe('the help card on the map', () => {
+  it('replaces the legend', async () => {
+    render(<Map />);
+
+    // Before any route exists these strings belonged only to the legend; the
+    // info panel that also uses them appears with a route.
+    expect(screen.queryByText('🚶 Walking')).toBeNull();
+    expect(screen.queryByText('🛺 Rickshaw')).toBeNull();
+    expect(helpButton()).toBeDefined();
+  });
+
+  it('starts collapsed', () => {
+    render(<Map />);
+
+    expect(helpButton().getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByText(HELP_HEADING)).toBeNull();
+  });
+
+  it('closes itself when the map moves, so it cannot hide what the move shows', async () => {
+    searchPlace.mockResolvedValue({ ok: true, places: [MALL_POINT] });
+    const user = userEvent.setup();
+    render(<Map />);
+
+    await user.click(helpButton());
+    expect(screen.getByText(HELP_HEADING)).toBeDefined();
+
+    await pick(user, 'From', 'Bashundhara', 'Bashundhara City');
+    await waitFor(() => expect(fitBounds).toHaveBeenCalled());
+
+    expect(screen.queryByText(HELP_HEADING)).toBeNull();
+    expect(helpButton().getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('closes itself for an area fit too', async () => {
+    searchPlace.mockResolvedValue({ ok: true, places: [BADDA_AREA] });
+    const user = userEvent.setup();
+    render(<Map />);
+
+    await user.click(helpButton());
+    await pick(user, 'To', 'Badda', 'Badda');
+    await waitFor(() => expect(fittedTo(BADDA_BOX)).toBe(true));
+
+    expect(screen.queryByText(HELP_HEADING)).toBeNull();
+  });
+
+  it('keeps fits clear of the collapsed button', async () => {
+    // jsdom reports every rect as zero, so the button is given a real one: 70px
+    // tall from the bottom of the viewport, as on a phone.
+    searchPlace.mockResolvedValue({ ok: true, places: [MALL_POINT] });
+    const user = userEvent.setup();
+    render(<Map />);
+
+    const top = window.innerHeight - 70;
+    vi.spyOn(helpButton(), 'getBoundingClientRect').mockReturnValue(
+      { top, bottom: top + 36, left: 16, right: 110, width: 94, height: 36, x: 16, y: top, toJSON: () => ({}) },
+    );
+
+    await pick(user, 'From', 'Bashundhara', 'Bashundhara City');
+    await waitFor(() => expect(fitBounds).toHaveBeenCalled());
+
+    const [, options] = fitBounds.mock.calls.at(-1)!;
+    // 70px of button plus the usual 24px margin.
+    expect(options.paddingBottomRight[1]).toBe(94);
+  });
+});

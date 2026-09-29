@@ -25,6 +25,7 @@ import {
   type PlaceResult,
 } from "../lib/osrm";
 import SearchBox from "./SearchBox";
+import HelpCard from "./HelpCard";
 import { RICKSHAW_STANDS } from "../lib/rickshawStands";
 
 const startIcon = L.divIcon({
@@ -244,6 +245,12 @@ export default function Map() {
   const searchPanelRef = useRef<HTMLDivElement>(null);
   const infoPanelRef = useRef<HTMLDivElement>(null);
 
+  // The help card, bottom-left. Collapsed by default so it never covers the
+  // map unless someone opens it; closed again by every map move — see
+  // showOnMap.
+  const [helpOpen, setHelpOpen] = useState(false);
+  const helpButtonRef = useRef<HTMLButtonElement>(null);
+
   /**
    * How much of the map the panels are sitting on, right now.
    *
@@ -262,23 +269,42 @@ export default function Map() {
    * top band; the info panel reaches the right edge so its width blocks the
    * right column. That over-pads slightly near the corners, which is the right
    * direction to be wrong in.
+   *
+   * The help button in the bottom-left corner blocks the bottom band, by the
+   * same logic. A route fit puts its endpoints in the corners, so a trip
+   * running south-west to north-east lands its start marker exactly there.
+   * The bottom band rather than the left column because on a phone height is
+   * the plentiful dimension and width the scarce one — the info panel already
+   * takes a share of the width.
+   *
+   * Only the collapsed button is ever measured. The open card is too big to
+   * pad around — beside the info panel it would leave a phone nothing to fit
+   * into — so showOnMap closes it before every fit instead.
    */
   function panelPadding() {
     const search = searchPanelRef.current?.getBoundingClientRect();
     const info = infoPanelRef.current?.getBoundingClientRect();
+    const help = helpButtonRef.current?.getBoundingClientRect();
 
     const top = (search ? search.bottom : 0) + MAP_FIT_MARGIN;
     const right =
       (info ? Math.max(window.innerWidth - info.left, 0) : 0) + MAP_FIT_MARGIN;
+    const bottom =
+      (help ? Math.max(window.innerHeight - help.top, 0) : 0) + MAP_FIT_MARGIN;
 
     return {
       paddingTopLeft: [MAP_FIT_MARGIN, top] as [number, number],
-      paddingBottomRight: [right, MAP_FIT_MARGIN] as [number, number],
+      paddingBottomRight: [right, bottom] as [number, number],
     };
   }
 
   /** The only two places allowed to move the map. */
   function showOnMap(target: MapTargetRequest) {
+    // Collapsed in the same batch as the new target, so by the time the fit
+    // measures, the card is gone and only the button is left to pad around.
+    // An open card over the place just searched for would hide exactly what
+    // the move is there to show.
+    setHelpOpen(false);
     mapTargetToken.current += 1;
     setMapTarget({ ...target, token: mapTargetToken.current });
   }
@@ -1177,61 +1203,13 @@ export default function Map() {
         </div>
       )}
 
-      {/* ── Legend ── */}
-      <div
-        style={{
-          position: "absolute",
-          bottom: "32px",
-          left: "16px",
-          zIndex: 1000,
-          background: "rgba(15,23,42,0.9)",
-          padding: "12px 16px",
-          borderRadius: "12px",
-          backdropFilter: "blur(8px)",
-          display: "flex",
-          flexDirection: "column",
-          gap: "8px",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "8px",
-            color: "white",
-            fontSize: "13px",
-          }}
-        >
-          <div
-            style={{
-              width: "24px",
-              height: "4px",
-              background: "#22c55e",
-              borderRadius: "2px",
-            }}
-          />
-          🚶 Walking
-        </div>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "8px",
-            color: "white",
-            fontSize: "13px",
-          }}
-        >
-          <div
-            style={{
-              width: "24px",
-              height: "4px",
-              background: "#f59e0b",
-              borderRadius: "2px",
-            }}
-          />
-          🛺 Rickshaw
-        </div>
-      </div>
+      {/* ── Help ── where the legend was. The legend's colour key is not
+          carried over: both lines are the same walking route drawn twice. */}
+      <HelpCard
+        open={helpOpen}
+        onOpenChange={setHelpOpen}
+        buttonRef={helpButtonRef}
+      />
 
       <MapContainer
         center={[23.8103, 90.4125]}
