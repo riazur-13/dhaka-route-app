@@ -561,6 +561,67 @@ def get_average_fare(distance_km: float, route_type: str, vehicle_type: str = "p
 SEARCH_UNAVAILABLE = "Place search is unavailable right now. Please try again in a moment."
 
 
+# Nominatim's place_rank below which a result is an area rather than somewhere
+# to stand. Provider-specific, like everything that reads Nominatim's fields.
+#
+# 26 is where the scale turns from areas into features: 26-27 are streets,
+# 28-30 addresses, buildings and POIs. Everything below is a district, borough,
+# suburb, quarter or neighbourhood — checked live, "Badda" comes back at 18
+# (borough) and 19 (suburb), "Gulshan 1" at 20 (quarter), a mall at 30. The
+# coordinates of an area are a label position, not a pickup point; Badda's sat
+# in a lake, OSRM snapped it to a road somewhere else, and the fare was priced
+# for a trip nobody asked for.
+#
+# Streets stay points on purpose. A street's coordinate lies on the street, so a
+# route to it goes where the user said, even if not to the exact door.
+AREA_RANK_THRESHOLD = 26
+
+
+def _nominatim_bbox(place: dict) -> list[list[float]] | None:
+    """Nominatim's boundingbox as [[south, west], [north, east]], or None.
+
+    Nominatim sends ["south", "north", "west", "east"] as strings. The output is
+    reordered into corner pairs because that is what Leaflet's latLngBounds
+    takes, and it keeps the provider's field order from leaking downstream.
+
+    None rather than raising on anything malformed: a missing box costs this
+    result its area treatment, and it falls back to being a point — which is
+    what every result was before this existed.
+    """
+    try:
+        south, north, west, east = (float(v) for v in place["boundingbox"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (south <= north and west <= east):
+        return None
+    return [[south, west], [north, east]]
+
+
+def _nominatim_place(place: dict) -> dict:
+    """One Nominatim result in our provider-neutral shape.
+
+    is_area and bbox are the fields a provider swap has to reproduce; the
+    frontend and the cache know nothing about place_rank.
+    """
+    bbox = _nominatim_bbox(place)
+    try:
+        rank = int(place.get("place_rank"))
+    except (TypeError, ValueError):
+        rank = None
+
+    return {
+        "name": ", ".join(place["display_name"].split(", ")[:3]),
+        "full_name": place["display_name"],
+        "lat": float(place["lat"]),
+        "lng": float(place["lon"]),
+        # Only an area when there is a box to show it with. An area with
+        # nowhere to fit the map would leave the frontend with neither a pin
+        # nor a view, so without a box it stays a point, as before.
+        "is_area": rank is not None and rank < AREA_RANK_THRESHOLD and bbox is not None,
+        "bbox": bbox,
+    }
+
+
 @app.get("/search")
 async def search_place(query: str):
     # The cache is what makes search-as-you-type safe to point at Nominatim.
@@ -584,7 +645,8 @@ async def search_place(query: str):
 
     # --- everything from here to the `results` list is provider-specific ---
     # A move to Mapbox or LocationIQ replaces the URL, the params, and the
-    # field mapping below. Nothing else changes: the cache stores the parsed
+    # field mapping in _nominatim_place and _nominatim_bbox above, including
+    # what counts as an area. Nothing else changes: the cache stores the parsed
     # shape rather than the provider's body, so the table, the TTLs, the
     # response contract and the whole frontend stay as they are.
     full_query = f"{query}, Dhaka, Bangladesh"
@@ -616,15 +678,7 @@ async def search_place(query: str):
         await cache_write(cache_search_failure, query, what="Place search")
         raise HTTPException(status_code=502, detail=SEARCH_UNAVAILABLE)
 
-    results = [
-        {
-            "name": ", ".join(place["display_name"].split(", ")[:3]),
-            "full_name": place["display_name"],
-            "lat": float(place["lat"]),
-            "lng": float(place["lon"]),
-        }
-        for place in data
-    ]
+    results = [_nominatim_place(place) for place in data]
     # --- end provider-specific section ---
 
     # Written even when empty. Zero matches is a real answer, and it is the

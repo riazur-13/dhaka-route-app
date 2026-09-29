@@ -398,7 +398,7 @@ describe('Enter picks from the dropdown', () => {
     await user.keyboard('{Enter}');
 
     expect(onSelect).toHaveBeenCalledTimes(1);
-    expect(onSelect).toHaveBeenCalledWith(23.78, 90.416, 'Gulshan 1');
+    expect(onSelect).toHaveBeenCalledWith(GULSHAN_PLACES[0]);
     // Picked from what was on screen: no fresh request stood between the
     // keypress and the pick, so the top result cannot have changed under it.
     expect(searchPlace.mock.calls.length).toBe(searchesBefore);
@@ -413,7 +413,7 @@ describe('Enter picks from the dropdown', () => {
     await user.keyboard('{ArrowDown}{Enter}');
 
     expect(onSelect).toHaveBeenCalledTimes(1);
-    expect(onSelect).toHaveBeenCalledWith(23.794, 90.414, 'Gulshan 2');
+    expect(onSelect).toHaveBeenCalledWith(GULSHAN_PLACES[1]);
   });
 
   it('points aria-activedescendant at the highlighted option', async () => {
@@ -450,7 +450,7 @@ describe('Enter picks from the dropdown', () => {
     release({ ok: true, places: GULSHAN_PLACES });
 
     await waitFor(() => expect(onSelect).toHaveBeenCalledTimes(1), { timeout: 3000 });
-    expect(onSelect).toHaveBeenCalledWith(23.78, 90.416, 'Gulshan 1');
+    expect(onSelect).toHaveBeenCalledWith(GULSHAN_PLACES[0]);
   });
 
   it('does not select a result belonging to a previous query', async () => {
@@ -474,8 +474,8 @@ describe('Enter picks from the dropdown', () => {
     // And the Enter was not dropped: it resolves against the right query.
     release({ ok: true, places: GULSHAN_PLACES });
     await waitFor(() => expect(onSelect).toHaveBeenCalledTimes(1), { timeout: 3000 });
-    expect(onSelect).toHaveBeenCalledWith(23.78, 90.416, 'Gulshan 1');
-    expect(onSelect).not.toHaveBeenCalledWith(23.723, 90.412, 'Gulistan');
+    expect(onSelect).toHaveBeenCalledWith(GULSHAN_PLACES[0]);
+    expect(onSelect).not.toHaveBeenCalledWith(GUL_PLACES[0]);
   });
 
   it('does not pick the old list after backspacing below the minimum', async () => {
@@ -614,7 +614,7 @@ describe('start and destination together', () => {
     await screen.findByRole('listbox');
     await user.keyboard('{ArrowDown}{Enter}');
 
-    expect(toSelect).toHaveBeenCalledWith(23.794, 90.414, 'Gulshan 2');
+    expect(toSelect).toHaveBeenCalledWith(GULSHAN_PLACES[1]);
     expect(fromSelect).not.toHaveBeenCalled();
   });
 });

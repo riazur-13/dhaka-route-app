@@ -322,6 +322,29 @@ def normalise_query(query: str) -> str:
     return _WHITESPACE_RUN.sub(" ", unicodedata.normalize("NFC", query)).strip().casefold()
 
 
+# Bumped whenever the shape of a cached result changes. v2 added is_area and
+# bbox; a v1 row has neither, and read as current it would hand the frontend a
+# district's label point as a pin — the Badda-in-a-lake bug this field exists
+# to stop.
+SEARCH_CACHE_VERSION = 2
+
+
+def search_cache_key(query: str) -> str:
+    """The row a query is stored under: its normalised text, plus the version.
+
+    Versioned rather than clearing the table, and the reason is deploys. Render
+    keeps the old instance serving until the new one is healthy, so a DELETE at
+    startup races it: the old code can write an old-shape row after the clear,
+    and the new code would read that row as current. Different versions write
+    different keys, so the two can never meet.
+
+    The cost is that old-version rows stay in the table, unread. Nothing prunes
+    expired rows yet, so they stay until someone does; the table is bounded by
+    distinct queries either way.
+    """
+    return f"v{SEARCH_CACHE_VERSION}:{normalise_query(query)}"
+
+
 class CachedSearch(NamedTuple):
     """A cache hit for a search query.
 
@@ -348,7 +371,7 @@ def lookup_search_results(query: str) -> CachedSearch | None:
             SELECT results FROM search_cache
             WHERE query = %s AND expires_at > NOW()
             """,
-            (normalise_query(query),),
+            (search_cache_key(query),),
         )
         row = cursor.fetchone()
 
@@ -356,7 +379,8 @@ def lookup_search_results(query: str) -> CachedSearch | None:
 
 
 def _write_search_entry(query: str, results: list[dict] | None, ttl: timedelta) -> None:
-    """Upsert one entry. The key is the normalised query, so re-writes replace."""
+    """Upsert one entry. The key is the versioned, normalised query, so
+    re-writes replace."""
     with db_cursor() as cursor:
         cursor.execute(
             """
@@ -369,7 +393,7 @@ def _write_search_entry(query: str, results: list[dict] | None, ttl: timedelta) 
             # array, not to JSONB, and these rows are objects rather than
             # scalars. None stays None and lands as SQL NULL.
             (
-                normalise_query(query),
+                search_cache_key(query),
                 json.dumps(results) if results is not None else None,
                 ttl,
             ),

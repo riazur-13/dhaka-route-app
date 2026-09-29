@@ -36,7 +36,14 @@ const mapInstance = { fitBounds };
 vi.mock('react-leaflet', () => ({
   MapContainer: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
   TileLayer: () => null,
-  Marker: () => null,
+  // Start and end markers render something findable; the rickshaw stands stay
+  // silent. Told apart by the icon's colour, which the divIcon stub below
+  // hands through — the same thing that tells them apart on screen.
+  Marker: ({ position, icon }: { position: [number, number]; icon?: { html?: string } }) => {
+    const html = icon?.html ?? '';
+    const which = html.includes('#22c55e') ? 'start' : html.includes('#ef4444') ? 'end' : null;
+    return which ? <div data-testid={`${which}-marker`} data-position={position.join(',')} /> : null;
+  },
   Polyline: () => null,
   Popup: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
   useMapEvents: (handlers: { click: MapClick }) => {
@@ -48,7 +55,7 @@ vi.mock('react-leaflet', () => ({
 
 vi.mock('leaflet', () => ({
   default: {
-    divIcon: () => ({}),
+    divIcon: (options: { html?: string }) => ({ html: options.html }),
     // A real-enough bounds: the tests need to see which coordinates went in,
     // so this records them rather than returning an opaque object.
     latLngBounds: (coords: [number, number][]) => ({ coords }),
@@ -63,7 +70,10 @@ const submitFare = vi.fn();
 const searchPlace = vi.fn();
 const pingHealth = vi.fn();
 
-vi.mock('../lib/osrm', () => ({
+vi.mock('../lib/osrm', async (importOriginal) => ({
+  // The real one: it is pure, and it is the decision under test when a search
+  // result is an area.
+  areaBounds: (await importOriginal<typeof import('../lib/osrm')>()).areaBounds,
   fetchRoute: (...args: unknown[]) => fetchRoute(...args),
   getAverageFare: (...args: unknown[]) => getAverageFare(...args),
   getAIRecommendation: (...args: unknown[]) => getAIRecommendation(...args),
@@ -324,5 +334,231 @@ describe('moving the map', () => {
     // No route yet, so no info panel exists to measure — the right padding
     // falls back to the plain margin rather than a stale or hardcoded width.
     expect(options.paddingBottomRight[0]).toBe(options.paddingTopLeft[0]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Areas from search get no pin.
+//
+// "Badda" came back as the area's label point, which sat in a lake. OSRM
+// snapped it to a road somewhere else and the fare was priced for a trip nobody
+// asked for. An area now moves the map to show itself and waits for a tap.
+// ---------------------------------------------------------------------------
+
+const BADDA_BOX: [[number, number], [number, number]] = [
+  [23.7612, 90.4062],
+  [23.797, 90.4486],
+];
+
+const BADDA_AREA = {
+  name: 'Badda',
+  full_name: 'Badda, Dhaka, Dhaka Metropolitan, Bangladesh',
+  lat: 23.78,
+  lng: 90.425,
+  is_area: true,
+  bbox: BADDA_BOX,
+};
+
+const MALL_POINT = {
+  name: 'Bashundhara City',
+  full_name: 'Bashundhara City, Panthapath, Dhaka',
+  lat: 23.7507,
+  lng: 90.3927,
+  is_area: false,
+  bbox: [[23.7501, 90.392], [23.7513, 90.3934]],
+};
+
+const TAP_INSIDE = 'এলাকার ভেতরে সঠিক জায়গায় ট্যাপ করুন';
+
+const START = { lat: 23.81, lng: 90.41 };
+
+async function tapStart() {
+  await waitFor(() => expect(mapClick).toBeTypeOf('function'));
+  mapClick({ latlng: START });
+  await waitFor(() => expect(screen.getByTestId('start-marker')).toBeDefined());
+}
+
+/** Search one of the two boxes and pick the result named `name`. */
+async function pick(
+  user: ReturnType<typeof userEvent.setup>,
+  box: 'From' | 'To',
+  query: string,
+  name: string,
+) {
+  await user.type(screen.getByRole('combobox', { name: new RegExp(`^${box}`) }), query);
+  await user.click(await screen.findByRole('option', { name: new RegExp(`^${name}`) }));
+}
+
+/** Was the map ever fitted to exactly these coordinates? */
+function fittedTo(coords: unknown) {
+  return fitBounds.mock.calls.some(([bounds]) =>
+    JSON.stringify((bounds as { coords: unknown }).coords) === JSON.stringify(coords),
+  );
+}
+
+describe('an area from search', () => {
+  it('sets no point and fetches no route', async () => {
+    searchPlace.mockResolvedValue({ ok: true, places: [BADDA_AREA] });
+    const user = userEvent.setup();
+    render(<Map />);
+
+    // A start already set, so a point here *would* route. That is what makes
+    // "no route" mean something.
+    await tapStart();
+    await pick(user, 'To', 'Badda', 'Badda');
+
+    expect(await screen.findByText(TAP_INSIDE)).toBeDefined();
+    expect(screen.queryByTestId('end-marker')).toBeNull();
+    expect(fetchRoute).not.toHaveBeenCalled();
+    // The start is untouched: only the box that picked the area gave up its point.
+    expect(screen.getByTestId('start-marker')).toBeDefined();
+  });
+
+  it('moves the map to the whole area, through the panel-aware fit', async () => {
+    searchPlace.mockResolvedValue({ ok: true, places: [BADDA_AREA] });
+    const user = userEvent.setup();
+    render(<Map />);
+
+    await pick(user, 'From', 'Badda', 'Badda');
+
+    await waitFor(() => expect(fittedTo(BADDA_BOX)).toBe(true));
+    // Not the label point: a degenerate box there is the old behaviour.
+    expect(
+      fittedTo([[BADDA_AREA.lat, BADDA_AREA.lng], [BADDA_AREA.lat, BADDA_AREA.lng]]),
+    ).toBe(false);
+
+    // Padded like every other fit, so the area is not shown under the panels.
+    const options = fitBounds.mock.calls.at(-1)![1];
+    expect(options.paddingTopLeft[1]).toBeGreaterThan(0);
+  });
+
+  it('lets the next tap set the point as normal, and route', async () => {
+    searchPlace.mockResolvedValue({ ok: true, places: [BADDA_AREA] });
+    const user = userEvent.setup();
+    render(<Map />);
+
+    await tapStart();
+    await pick(user, 'To', 'Badda', 'Badda');
+    await screen.findByText(TAP_INSIDE);
+
+    mapClick({ latlng: { lat: 23.785, lng: 90.43 } });
+
+    await waitFor(() => expect(fetchRoute).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId('end-marker').dataset.position).toBe('23.785,90.43');
+    expect(fetchRoute.mock.calls[0][0]).toEqual([START.lat, START.lng]);
+    expect(fetchRoute.mock.calls[0][1]).toEqual([23.785, 90.43]);
+    // The prompt has done its job.
+    expect(screen.queryByText(TAP_INSIDE)).toBeNull();
+  });
+
+  it('clears the old route when an area replaces a routed destination', async () => {
+    searchPlace.mockResolvedValue({ ok: true, places: [BADDA_AREA] });
+    const user = userEvent.setup();
+    await drawARoute();
+    expect(await screen.findByText('Which rickshaw?')).toBeDefined();
+
+    await pick(user, 'To', 'Badda', 'Badda');
+
+    await screen.findByText(TAP_INSIDE);
+    // The box now names Badda; a marker and route to the old place would
+    // contradict it.
+    expect(screen.queryByTestId('end-marker')).toBeNull();
+    expect(screen.queryByText('Which rickshaw?')).toBeNull();
+  });
+
+  it('stops a route still in flight from landing over the area', async () => {
+    // Clearing routeData does not stop a chain already running, and no
+    // getRoute follows an area pick to abort it.
+    let release: (v: unknown) => void = () => {};
+    fetchRoute.mockImplementationOnce(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+    searchPlace.mockResolvedValue({ ok: true, places: [BADDA_AREA] });
+    const user = userEvent.setup();
+
+    await drawARoute(); // the second click starts the held route
+    await pick(user, 'To', 'Badda', 'Badda');
+    await screen.findByText(TAP_INSIDE);
+
+    release(ROUTE);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(screen.queryByText('Which rickshaw?')).toBeNull();
+    expect(getAverageFare).not.toHaveBeenCalled();
+  });
+
+  it('for the start, with a destination set, routes once the start is tapped', async () => {
+    // Picking an area for the start clears it while the destination stays.
+    // The tap that follows fills an empty start with the end already set —
+    // which used to place the marker and never route.
+    searchPlace.mockResolvedValue({ ok: true, places: [BADDA_AREA] });
+    const user = userEvent.setup();
+    await drawARoute();
+
+    await pick(user, 'From', 'Badda', 'Badda');
+    await screen.findByText(TAP_INSIDE);
+    expect(screen.queryByTestId('start-marker')).toBeNull();
+    expect(screen.getByTestId('end-marker')).toBeDefined();
+
+    mapClick({ latlng: { lat: 23.785, lng: 90.43 } });
+
+    await waitFor(() => expect(fetchRoute).toHaveBeenCalledTimes(2));
+    expect(fetchRoute.mock.calls[1][0]).toEqual([23.785, 90.43]);
+    expect(fetchRoute.mock.calls[1][1]).toEqual([23.78, 90.42]);
+    // And the destination survived: this was not the third-click reset.
+    expect(screen.getByTestId('end-marker')).toBeDefined();
+  });
+});
+
+describe('a point from search', () => {
+  it('pins and routes as before', async () => {
+    searchPlace.mockResolvedValue({ ok: true, places: [MALL_POINT] });
+    const user = userEvent.setup();
+    render(<Map />);
+
+    await tapStart();
+    await pick(user, 'To', 'Bashundhara', 'Bashundhara City');
+
+    await waitFor(() => expect(fetchRoute).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId('end-marker').dataset.position).toBe('23.7507,90.3927');
+    expect(fittedTo([[23.7507, 90.3927], [23.7507, 90.3927]])).toBe(true);
+    expect(screen.queryByText(TAP_INSIDE)).toBeNull();
+  });
+
+  it('routes when the destination is searched first and the start tapped after', async () => {
+    // The pre-existing gap, fixed alongside: both markers, and no route.
+    searchPlace.mockResolvedValue({ ok: true, places: [MALL_POINT] });
+    const user = userEvent.setup();
+    render(<Map />);
+
+    await pick(user, 'To', 'Bashundhara', 'Bashundhara City');
+    await waitFor(() => expect(screen.getByTestId('end-marker')).toBeDefined());
+    expect(fetchRoute).not.toHaveBeenCalled();
+
+    await tapStart();
+
+    await waitFor(() => expect(fetchRoute).toHaveBeenCalledTimes(1));
+    expect(fetchRoute.mock.calls[0][0]).toEqual([START.lat, START.lng]);
+    expect(fetchRoute.mock.calls[0][1]).toEqual([23.7507, 90.3927]);
+  });
+
+  it('treats a result cached before is_area existed as a point, without crashing', async () => {
+    // What an old-shape entry looks like: no is_area, no bbox.
+    const oldShape = {
+      name: MALL_POINT.name,
+      full_name: MALL_POINT.full_name,
+      lat: MALL_POINT.lat,
+      lng: MALL_POINT.lng,
+    };
+    searchPlace.mockResolvedValue({ ok: true, places: [oldShape] });
+    const user = userEvent.setup();
+    render(<Map />);
+
+    await tapStart();
+    await pick(user, 'To', 'Bashundhara', 'Bashundhara City');
+
+    await waitFor(() => expect(fetchRoute).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId('end-marker')).toBeDefined();
+    expect(screen.queryByText(TAP_INSIDE)).toBeNull();
   });
 });

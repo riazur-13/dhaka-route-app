@@ -1,18 +1,15 @@
 'use client';
 
 import { useState, useEffect, useEffectEvent, useId, useRef } from 'react';
-import { searchPlace } from '../lib/osrm';
+import { searchPlace, type PlaceResult } from '../lib/osrm';
 
-interface SearchResult {
-  name: string;
-  full_name: string;
-  lat: number;
-  lng: number;
-}
+type SearchResult = PlaceResult;
 
 interface Props {
   placeholder: string;
-  onSelect: (lat: number, lng: number, name: string) => void;
+  // The whole result, not just its coordinates: whether it is an area decides
+  // what the map does with it, and that decision belongs to the map, not here.
+  onSelect: (place: PlaceResult) => void;
   color: string;
   value?: string; // ← new prop to control value from outside
   pending?: boolean; // a place name is being looked up for this box
@@ -207,7 +204,7 @@ export default function SearchBox({ placeholder, onSelect, color, value = '', pe
     pendingEnter.current = null;
     setQuery(result.name);
     setShowDropdown(false);
-    onSelect(result.lat, result.lng, result.name);
+    onSelect(result);
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {

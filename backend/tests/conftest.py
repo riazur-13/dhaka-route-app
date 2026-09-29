@@ -296,7 +296,7 @@ class SearchCache:
         with database.db_cursor() as cursor:
             cursor.execute(
                 "SELECT results FROM search_cache WHERE query = %s",
-                (database.normalise_query(query),),
+                (database.search_cache_key(query),),
             )
             row = cursor.fetchone()
             return None if row is None else row[0]
@@ -308,9 +308,25 @@ class SearchCache:
                 SELECT EXTRACT(EPOCH FROM (expires_at - NOW())) FROM search_cache
                 WHERE query = %s
                 """,
-                (database.normalise_query(query),),
+                (database.search_cache_key(query),),
             )
             return float(cursor.fetchone()[0])
+
+    def store_raw(self, key: str, results: list[dict]) -> None:
+        """Plant a row under an exact key, bypassing the versioning.
+
+        For the rows an older deploy wrote and this one has to live alongside:
+        the point is to put them where that code put them, not where this code
+        would.
+        """
+        with database.db_cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO search_cache (query, results, expires_at)
+                VALUES (%s, %s, NOW() + INTERVAL '30 days')
+                """,
+                (key, json.dumps(results)),
+            )
 
     def expire(self, query: str) -> None:
         """Age an entry out, so TTL behaviour is testable without waiting."""
@@ -320,7 +336,7 @@ class SearchCache:
                 UPDATE search_cache SET expires_at = NOW() - INTERVAL '1 second'
                 WHERE query = %s
                 """,
-                (database.normalise_query(query),),
+                (database.search_cache_key(query),),
             )
 
 

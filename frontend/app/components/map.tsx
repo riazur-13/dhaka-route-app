@@ -19,7 +19,10 @@ import {
   reverseGeocode,
   getAIRecommendation,
   pingHealth,
+  areaBounds,
+  type Bounds,
   type FareSubmitResult,
+  type PlaceResult,
 } from "../lib/osrm";
 import SearchBox from "./SearchBox";
 import { RICKSHAW_STANDS } from "../lib/rickshawStands";
@@ -78,7 +81,9 @@ function ClickHandler({
  */
 type MapTargetRequest =
   | { kind: "point"; lat: number; lng: number }
-  | { kind: "route"; coordinates: [number, number][] };
+  | { kind: "route"; coordinates: [number, number][] }
+  // An area from search: shown whole, so the user can tap the real spot in it.
+  | { kind: "bounds"; bounds: Bounds };
 
 type MapTarget = MapTargetRequest & { token: number };
 
@@ -126,7 +131,9 @@ function MapController({
     const bounds =
       target.kind === "point"
         ? L.latLngBounds([[target.lat, target.lng], [target.lat, target.lng]])
-        : L.latLngBounds(target.coordinates);
+        : target.kind === "bounds"
+          ? L.latLngBounds(target.bounds)
+          : L.latLngBounds(target.coordinates);
 
     map.fitBounds(bounds, {
       ...panelPadding(),
@@ -223,6 +230,16 @@ export default function Map() {
   // what lets a user pan somewhere and stay there.
   const [mapTarget, setMapTarget] = useState<MapTarget | null>(null);
   const mapTargetToken = useRef(0);
+
+  // Which box last picked an area from search, and so is waiting for the user
+  // to tap the real spot inside it. Per box rather than a flag, because the
+  // prompt is about that box: it goes stale the moment that box gets a point by
+  // any route — a map tap, a search pick, current location — and a point set
+  // in the *other* box leaves it standing.
+  const [areaPromptFor, setAreaPromptFor] = useState<NameField | null>(null);
+  function clearAreaPromptFor(field: NameField) {
+    setAreaPromptFor((current) => (current === field ? null : current));
+  }
 
   const searchPanelRef = useRef<HTMLDivElement>(null);
   const infoPanelRef = useRef<HTMLDivElement>(null);
@@ -413,6 +430,7 @@ export default function Map() {
         const lng = position.coords.longitude;
 
         // Marker and skeleton first, before the await, same as a map click.
+        clearAreaPromptFor("start");
         setStart([lat, lng]);
         setStartName("");
         setStartNamePending(true);
@@ -517,6 +535,15 @@ export default function Map() {
     // best part of a minute. The name arrives later and fills the skeleton in.
     const field: NameField = !start || end ? "start" : "end";
     const routeFrom = field === "end" ? start : null;
+    // The other direction: this tap fills an empty start while a destination
+    // is already set. Only search can leave things that way — pick a
+    // destination first, or pick an area for the start and clear it — and
+    // before this the tap placed a second marker and never routed between
+    // them. Not the third-click case: there both were set, and the reset
+    // below clears the end.
+    const routeTo = !start && end ? end : null;
+
+    clearAreaPromptFor(field);
 
     if (field === "start") {
       setStart(point);
@@ -571,22 +598,14 @@ export default function Map() {
     applyPlaceName(field, result.name);
 
     if (routeFrom) await getRoute(routeFrom, point);
+    else if (routeTo) await getRoute(point, routeTo);
   }
 
-  async function handleSearchSelect(
-    type: "start" | "end",
-    lat: number,
-    lng: number,
-    name: string,
-  ) {
+  async function handleSearchSelect(type: NameField, place: PlaceResult) {
+    const { lat, lng, name } = place;
     const point: [number, number] = [lat, lng];
 
     setErrorMessage(null);
-
-    // Trigger one: the user picked a place, so show it to them. Before this
-    // the map never moved at all — the marker was dropped at coordinates that
-    // could be anywhere, including outside the viewport entirely.
-    showOnMap({ kind: "point", lat, lng });
 
     // Search already knows the name, so any reverse geocode still running for
     // this box is both redundant and a stale write waiting to happen. Cancel it
@@ -596,6 +615,48 @@ export default function Map() {
     geocodeAbort.current[type] = null;
     if (type === "start") setStartNamePending(false);
     else setEndNamePending(false);
+
+    const area = areaBounds(place);
+    if (area) {
+      // An area — a district, a suburb, a neighbourhood. Its coordinates are a
+      // label position, not a place to stand: Badda's sat in a lake, OSRM
+      // snapped it to a road somewhere else, and the fare was priced for a trip
+      // nobody asked for. So no pin and no route. Show the whole area and let
+      // the user tap the real spot; that tap goes through handleMapClick like
+      // any other.
+      showOnMap({ kind: "bounds", bounds: area });
+      setAreaPromptFor(type);
+
+      // This box's old point goes, and the route with it. The box now names
+      // the area; a marker and a route to wherever it pointed before would
+      // contradict it.
+      if (type === "start") {
+        setStart(null);
+        setStartName(name);
+      } else {
+        setEnd(null);
+        setEndName(name);
+      }
+
+      // Including a route chain still in flight. Clearing routeData does not
+      // stop one, and no getRoute follows here to abort it, so a chain started
+      // by an earlier pick would land a few seconds later and draw its route
+      // back over the area the user just chose.
+      routeAbort.current?.abort();
+      routeAbort.current = null;
+      setLoading(false);
+      setRouteData(null);
+      setAvgFare(null);
+      setAiRecommendation(null);
+      return;
+    }
+
+    clearAreaPromptFor(type);
+
+    // Trigger one: the user picked a place, so show it to them. Before this
+    // the map never moved at all — the marker was dropped at coordinates that
+    // could be anywhere, including outside the viewport entirely.
+    showOnMap({ kind: "point", lat, lng });
 
     if (type === "start") {
       setStart(point);
@@ -682,9 +743,7 @@ export default function Map() {
           color="green"
           value={startName}
           pending={startNamePending}
-          onSelect={(lat, lng, name) =>
-            handleSearchSelect("start", lat, lng, name)
-          }
+          onSelect={(place) => handleSearchSelect("start", place)}
         />
         <div style={{ height: "1px", background: "#334155" }} />
         <SearchBox
@@ -692,10 +751,31 @@ export default function Map() {
           color="amber"
           value={endName}
           pending={endNamePending}
-          onSelect={(lat, lng, name) =>
-            handleSearchSelect("end", lat, lng, name)
-          }
+          onSelect={(place) => handleSearchSelect("end", place)}
         />
+
+        {/* Inside the search panel on purpose: panelPadding() measures this
+            panel at fit time, so the area fit can never land under the prompt
+            asking the user to tap inside it. role="status" so a screen reader
+            hears why no pin appeared. */}
+        {areaPromptFor && (
+          <p
+            role="status"
+            style={{
+              margin: 0,
+              padding: "8px 10px",
+              borderRadius: "8px",
+              background: "#f59e0b1a",
+              border: "1px solid #f59e0b66",
+              color: "#fde68a",
+              fontSize: "13px",
+              lineHeight: 1.6,
+              fontFamily: '"Noto Sans Bengali", sans-serif',
+            }}
+          >
+            এলাকার ভেতরে সঠিক জায়গায় ট্যাপ করুন
+          </p>
+        )}
 
         {/* Current location button */}
         <button

@@ -57,10 +57,10 @@ class TestASecondSearchCostsNothing:
     ):
         """What keeps the provider swappable.
 
-        The cache stores our {name, full_name, lat, lng} rather than
-        Nominatim's display_name/lat/lon, so moving to Mapbox or LocationIQ
-        changes the URL, the params and the field mapping in search_place() and
-        touches nothing here.
+        The cache stores our {name, full_name, lat, lng, is_area, bbox} rather
+        than Nominatim's display_name/lat/lon/place_rank/boundingbox, so moving
+        to Mapbox or LocationIQ changes the URL, the params and the field
+        mapping in _nominatim_place() and touches nothing here.
         """
         upstream.replies(status_code=200, json=NOMINATIM_ANSWER)
 
@@ -68,8 +68,10 @@ class TestASecondSearchCostsNothing:
 
         stored = search_cache.results_for("Dhanmondi")
         assert stored is not None
-        assert set(stored[0]) == {"name", "full_name", "lat", "lng"}
+        assert set(stored[0]) == {"name", "full_name", "lat", "lng", "is_area", "bbox"}
         assert "display_name" not in stored[0]
+        assert "place_rank" not in stored[0]
+        assert "boundingbox" not in stored[0]
 
 
 class TestAnEmptyResultIsCachedToo:

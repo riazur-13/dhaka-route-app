@@ -194,11 +194,48 @@ export async function getAverageFare(
     submissionCount: typeof data?.submission_count === 'number' ? data.submission_count : 0,
   };
 }
+/** [[south, west], [north, east]] — the shape Leaflet's latLngBounds takes. */
+export type Bounds = [[number, number], [number, number]];
+
 export interface PlaceResult {
   name: string;
   full_name: string;
   lat: number;
   lng: number;
+  // Optional because a search cached before these existed has neither, and
+  // the backend is not the only thing that has to survive that.
+  is_area?: boolean;
+  bbox?: Bounds | null;
+}
+
+/**
+ * The box to show for an area result, or null if this result is a point.
+ *
+ * An area's coordinates are a label position rather than a place to stand —
+ * Badda's sat in a lake, the route snapped to a road somewhere else, and the
+ * fare was priced for a trip nobody asked for. So an area gets the map moved
+ * to it, and no pin.
+ *
+ * A point unless both halves are present and sane. The backend already only
+ * marks an area when it has a box, so this is the belt to those braces — and
+ * the reason an old-shape result, missing both fields, is simply a point.
+ */
+export function areaBounds(place: PlaceResult): Bounds | null {
+  if (place.is_area !== true) return null;
+
+  const box = place.bbox;
+  const isPair = (p: unknown): p is [number, number] =>
+    Array.isArray(p) &&
+    p.length === 2 &&
+    p.every((n) => typeof n === 'number' && Number.isFinite(n));
+
+  if (!Array.isArray(box) || box.length !== 2 || !isPair(box[0]) || !isPair(box[1])) {
+    return null;
+  }
+  const [[south, west], [north, east]] = box;
+  if (south > north || west > east) return null;
+
+  return [[south, west], [north, east]];
 }
 
 export interface SearchResults {
