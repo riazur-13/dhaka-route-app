@@ -1,6 +1,6 @@
-'use client';
+"use client";
 
-import { useEffect, useId, useRef, type RefObject } from 'react';
+import { useEffect, useId, useRef, type RefObject } from "react";
 
 interface Props {
   open: boolean;
@@ -35,33 +35,34 @@ export default function HelpCard({ open, onOpenChange, buttonRef }: Props) {
     if (!open) return;
 
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key !== 'Escape') return;
+      if (event.key !== "Escape") return;
       // Focus goes back to the button only if it was inside the card, which is
       // about to disappear and take the focus with it. Focus in a search box
       // stays where the user put it.
-      const focusWasInside = cardRef.current?.contains(document.activeElement) ?? false;
+      const focusWasInside =
+        cardRef.current?.contains(document.activeElement) ?? false;
       onOpenChange(false);
       if (focusWasInside) buttonRef.current?.focus();
     }
 
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
   }, [open, onOpenChange, buttonRef]);
 
   return (
     <div
       style={{
-        position: 'absolute',
-        bottom: '32px',
-        left: '16px',
+        position: "absolute",
+        bottom: "32px",
+        left: "16px",
         zIndex: 1000,
-        display: 'flex',
+        display: "flex",
         // Reversed so the card sits visually above the button while coming
         // after it in the DOM: Tab goes button, then card, which is the order
         // someone opening it and then reading it actually wants.
-        flexDirection: 'column-reverse',
-        alignItems: 'flex-start',
-        gap: '8px',
+        flexDirection: "column-reverse",
+        alignItems: "flex-start",
+        gap: "8px",
         fontFamily: BENGALI_FONT,
       }}
     >
@@ -73,19 +74,19 @@ export default function HelpCard({ open, onOpenChange, buttonRef }: Props) {
         aria-controls={open ? cardId : undefined}
         onClick={() => onOpenChange(!open)}
         style={{
-          background: 'rgba(15,23,42,0.9)',
-          border: '1px solid #334155',
-          borderRadius: '999px',
-          color: 'white',
-          cursor: 'pointer',
+          background: "rgba(15,23,42,0.9)",
+          border: "1px solid #334155",
+          borderRadius: "999px",
+          color: "white",
+          cursor: "pointer",
           fontFamily: BENGALI_FONT,
-          fontSize: '14px',
+          fontSize: "14px",
           lineHeight: 1.4,
-          padding: '8px 14px',
-          backdropFilter: 'blur(8px)',
+          padding: "8px 14px",
+          backdropFilter: "blur(8px)",
         }}
       >
-        ? সাহায্য
+        সাহায্য?
       </button>
 
       {open && (
@@ -103,27 +104,30 @@ export default function HelpCard({ open, onOpenChange, buttonRef }: Props) {
           style={{
             // 320 wide, but never wider than the screen less the 16px gutter
             // either side, so a narrow phone gets no sideways scroll.
-            width: '320px',
-            maxWidth: 'calc(100vw - 32px)',
+            width: "320px",
+            maxWidth: "calc(100vw - 32px)",
             // Taller than a small phone's free space, so it scrolls inside
             // itself rather than running off the top of the screen.
-            maxHeight: 'calc(100vh - 140px)',
-            overflowY: 'auto',
-            boxSizing: 'border-box',
-            background: 'rgba(15,23,42,0.95)',
-            border: '1px solid #334155',
-            borderRadius: '12px',
-            backdropFilter: 'blur(8px)',
-            padding: '14px 16px',
-            color: '#e2e8f0',
-            fontSize: '14px',
+            maxHeight: "calc(100vh - 140px)",
+            overflowY: "auto",
+            boxSizing: "border-box",
+            background: "rgba(15,23,42,0.95)",
+            border: "1px solid #334155",
+            borderRadius: "12px",
+            backdropFilter: "blur(8px)",
+            padding: "14px 16px",
+            color: "#e2e8f0",
+            fontSize: "14px",
             lineHeight: 1.7,
           }}
         >
-          <h2 id={headingId} style={{ margin: '0 0 6px', fontSize: '15px', color: 'white' }}>
+          <h2
+            id={headingId}
+            style={{ margin: "0 0 6px", fontSize: "15px", color: "white" }}
+          >
             কীভাবে ব্যবহার করবেন
           </h2>
-          <ol style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+          <ol style={{ listStyle: "none", margin: 0, padding: 0 }}>
             <li>১. শুরুর জায়গা লিখুন বা ম্যাপে ট্যাপ করুন।</li>
             <li>২. গন্তব্য লিখুন বা ম্যাপে ট্যাপ করুন।</li>
             <li>৩. প্যাডেল নাকি ব্যাটারি রিকশা, বেছে নিন।</li>
@@ -131,14 +135,19 @@ export default function HelpCard({ open, onOpenChange, buttonRef }: Props) {
             <li>৫. যাত্রা শেষে কত দিলেন, তা জমা দিন।</li>
           </ol>
 
-          <h2 style={{ margin: '14px 0 6px', fontSize: '15px', color: 'white' }}>
+          <h2
+            style={{ margin: "14px 0 6px", fontSize: "15px", color: "white" }}
+          >
             জেনে রাখুন
           </h2>
-          <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+          <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
             <li>• ভাড়া আনুমানিক, নির্ধারিত নয়।</li>
             <li>• ব্যাটারি রিকশার ভাড়া প্যাডেলের চেয়ে কম।</li>
             <li>• বাংলায় লিখলে জায়গা খুঁজে পাওয়া সহজ।</li>
-            <li>• এলাকার নাম খুঁজলে ম্যাপ সেই এলাকায় যাবে, তারপর সঠিক জায়গায় ট্যাপ করুন।</li>
+            <li>
+              • এলাকার নাম খুঁজলে ম্যাপ সেই এলাকায় যাবে, তারপর সঠিক জায়গায়
+              ট্যাপ করুন।
+            </li>
           </ul>
         </div>
       )}
