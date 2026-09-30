@@ -86,7 +86,7 @@ export default function HelpCard({ open, onOpenChange, buttonRef }: Props) {
           backdropFilter: "blur(8px)",
         }}
       >
-        সাহায্য?
+        সাহায্য ?
       </button>
 
       {open && (
